@@ -1,0 +1,249 @@
+# mcp_calls.py
+# Synchronous wrappers for Confluence and GitHub API calls.
+# These are called directly by FastMCP tool definitions in mcp_tools.py.
+
+import re
+from typing import Any, Dict, List
+
+from confluence import confluence_api, ReviewActions, SyntaxActions
+from github_functions import github_api
+
+# Shared instances (created once, reused across all calls)
+syntax_actions = SyntaxActions(confluence_api)
+review_actions = ReviewActions(confluence_api, syntax_actions)
+
+# Helpers
+def _extract_confluence_page_ids(source: str) -> List[str]:
+    """Return a list of Confluence page IDs extracted from *source*.
+
+    *source* may contain plain numeric IDs, full Confluence page URLs, or a
+    mix of both, separated by commas or newlines.
+    """
+    if not source:
+        return []
+    tokens = re.split(r"[,\n]+", source)
+    ids: List[str] = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        m = re.search(r"pages/(\d+)", token)
+        if m:
+            ids.append(m.group(1))
+        elif token.isdigit():
+            ids.append(token)
+    return ids
+
+# -----------------------
+# Confluence calls
+# -----------------------
+def create_space(name: str, key: str, description: str) -> Dict[str, Any]:
+    response, error = confluence_api.create_space(name, key, description)
+    if response:
+        return {"success": True, "data": response.json()}
+    return {"success": False, "error": error or "Failed to create space"}
+
+def create_page(title: str, space_key: str, content: str) -> Dict[str, Any]:
+    response, error = confluence_api.create_page(title, space_key, content)
+    if response:
+        return {"success": True, "data": response.json()}
+    return {"success": False, "error": error or "Failed to create page"}
+
+def update_page(page_id: str, title: str, content: str, version: int, message: str) -> Dict[str, Any]:
+    response, error = confluence_api.update_page(page_id, title, content, version, message)
+    if response:
+        return {"success": True, "data": response.json()}
+    return {"success": False, "error": error or "Failed to update page"}
+
+def get_page_content(page_id: str) -> Dict[str, Any]:
+    text, error = confluence_api.get_page_storage(page_id)
+    if text is not None:
+        return {"success": True, "data": text}
+    return {"success": False, "error": error or "Failed to get page content"}
+
+def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_sections: int = 5) -> Dict[str, Any]:
+    text, error = syntax_actions.get_page_content_by_sections(page_id, chunk_size, max_sections)
+    if text is not None:
+        return {"success": True, "data": text}
+    return {"success": False, "error": error or "Failed to get page content"}
+
+def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "") -> Dict[str, Any]:
+    source = page_input or page_id
+    page_ids = _extract_confluence_page_ids(source)
+    if not page_ids:
+        return {
+            "success": False,
+            "error": "No valid Confluence page IDs found. Pass a page ID, a Confluence page URL, or multiple values separated by commas/newlines.",
+        }
+
+    if len(page_ids) == 1:
+        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id)
+        if result is not None:
+            return {"success": True, "data": result}
+        return {"success": False, "error": error or "Failed to review confluence page"}
+
+    reviewed = []
+    failed = []
+    for pid in page_ids:
+        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id)
+        if result is not None:
+            reviewed.append(result)
+        else:
+            failed.append({
+                "page_id": pid,
+                "error": error or "Failed to review confluence page",
+            })
+
+    if reviewed:
+        return {
+            "success": True,
+            "data": {
+                "mode": "batch",
+                "requested": len(page_ids),
+                "reviewed_count": len(reviewed),
+                "failed_count": len(failed),
+                "results": reviewed,
+                "errors": failed,
+            },
+        }
+
+    return {
+        "success": False,
+        "error": "Failed to review all provided pages",
+        "data": {
+            "mode": "batch",
+            "requested": len(page_ids),
+            "reviewed_count": 0,
+            "failed_count": len(failed),
+            "errors": failed,
+        },
+    }
+
+def post_footer_comment(page_id: str, comment: str) -> Dict[str, Any]:
+    response, error = confluence_api.post_footer_comment(page_id, comment)
+    if response:
+        return {"success": True, "data": response.json()}
+    return {"success": False, "error": error or "Failed to post footer comment"}
+
+def post_inline_comment(page_id: str, comment: str, text_selection: str) -> Dict[str, Any]:
+    result, error = confluence_api.post_inline_comment(page_id, comment, text_selection)
+    if result is not None:
+        return {"success": True, "data": result}
+    return {"success": False, "error": error or "Failed to post inline comment"}
+
+# -----------------------
+# GitHub calls
+# -----------------------
+def list_repositories():
+    try:
+        result = github_api.list_repositories()
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def list_pull_requests(repo: str, state: str = "open"):
+    try:
+        result = github_api.list_pull_requests(repo, state)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def add_comment(repo: str, pr_number: int, comment_text: str):
+    try:
+        result = github_api.add_comment(repo, pr_number, comment_text)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_files_in_pr(repo: str, pr_number: int):
+    try:
+        result = github_api.get_files_in_pr(repo, pr_number)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_base_and_head_sha(repo: str, pr_number: int):
+    try:
+        result = github_api.get_base_and_head_sha(repo, pr_number)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_file_content_at_ref(repo: str, file_path: str, ref: str):
+    try:
+        result = github_api.get_file_content_at_ref(repo, file_path, ref)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def file_with_line_no_and_diff(repo: str, pr_number: int, file_path: str):
+    try:
+        result = github_api.file_with_line_no_and_diff(repo, pr_number, file_path)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def add_file_level_comment(repo: str, pr_number: int, head_sha: str, comment_body: str, selected_path: str):
+    try:
+        result = github_api.add_file_level_comment(repo, pr_number, head_sha, comment_body, selected_path)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def add_inline_comment(repo: str, pr_number: int, head_sha: str, comment_body: str, selected_path: str, start_line: int, end_line: int, side: str):
+    try:
+        result = github_api.add_inline_comment(repo, pr_number, head_sha, comment_body, selected_path, start_line, end_line, side)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def show_comments(repo: str, pr_number: int):
+    try:
+        result = github_api.show_comments(repo, pr_number)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def reply_comment(repo: str, pr_number: str, comment_id: int, reply_text: str):
+    try:
+        result = github_api.reply_comment(repo, pr_number, comment_id, reply_text)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def review_pull_request(repo: str, pr_number: int, checklist: list):
+    try:
+        result = github_api.review_pull_request(repo, pr_number, checklist)
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def cleanup_old_bot_comments(
+    repo: str,
+    pr_number: int,
+    keep_latest: int = 1,
+    include_inline: bool = False,
+):
+    try:
+        result = github_api.cleanup_old_bot_comments(
+            repo,
+            pr_number,
+            keep_latest,
+            include_inline,
+        )
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# -----------------------
+# Example usage
+# -----------------------
+if __name__ == "__main__":
+    space_result = create_space("Test Space", "TEST", "Space created via sync call")
+    print("Create Space:", space_result)
+
+    page_result = create_page("Test Page", "TEST", "<p>This is a test page</p>")
+    print("Create Page:", page_result)
+
+    content_result = get_page_content("123456")
+    print("Page Content:", content_result)

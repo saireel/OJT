@@ -1,0 +1,17 @@
+{
+  "servers": {
+    "confluence": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "mcp_tools.py"
+      ],
+      "env": {
+        "ENABLE_READABILITY_CHECK": "true",
+        "READABILITY_SENTENCE_WORD_LIMIT": "40",
+        "READABILITY_PARAGRAPH_WORD_LIMIT": "250"
+      }
+    }
+  },
+  "inputs": []
+}

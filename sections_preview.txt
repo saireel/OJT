@@ -1,0 +1,122 @@
+page_id         : 22020693
+sections_returned: 7
+chunk_size      : 3000
+
+--- SECTION 1 (3015 chars) ---
+Science
+
+Science is a systematic discipline that builds and organises knowledge in the form of testable hypotheses and predictions about the universe.[1]: 49–71 [2] Modern science is typically divided into two – or three – major branches:[3] the natural sciences, which study the physical world, and the social sciences, which study individuals and societies.[4][5] While referred to as the formal sciences, the study of logic, mathematics, and theoretical computer science are typically regarded as separate because they rely on deductive reasoning instead of the scientific method as their main methodology.[6][7][8][9] Meanwhile, applied sciences are disciplines that use scientific knowledge for practical purposes, such as engineering and medicine.[10][11][12]
+
+The history of science spans the majority of the historical record, with the earliest identifiable predecessors to modern science dating to the Bronze Age in Egypt and Mesopotamia (c. 3000–1200 BCE). Their contributions to mathematics, astronomy, and medicine entered and shaped the Greek natural philosophy of classical antiquity and later medieval scholarship, whereby formal attempts were made to provide explanations of events in the physical world based on natural causes; while further advances, including the introduction of the Hindu–Arabic numeral system, were made during the Golden Age of India and Islamic Golden Age.[13]: 12 [14]: 1–26 [15][16][13]: 163–192
+
+The recovery and assimilation of Greek works and Islamic inquiries into Western Europe during the Renaissance revived natural philosophy,[13]: 193–224, 225–253 [17] which was later transformed by the Scientific Revolution that began in the 16th century[18] as new ideas and discoveries departed from previous Greek conceptions and traditions.[13]: 357–368 [14]: 274–322 The scientific method soon played a greater role in the acquisition of knowledge, and in the 19th century, many of the institutional and professional features of science began to take shape,[19][20] along with the changing of "natural philosophy" to "natural science".[21]
+
+New knowledge in science is advanced by research from scientists who are motivated by curiosity about the world and a desire to solve problems.[22][23] Contemporary scientific research is often highly collaborative and is frequently carried out by teams in academic and research institutions,[24] government agencies,[13]: 163–192 and companies.[25] At the same time, many major advances—particularly in fundamental science—have come from individual researchers and are widely recognised through major international awards such as the Nobel Prize. The practical results of scientific work have led to the emergence of science policies that seek to prioritise the responsible development of commercial products, health care, public infrastructure, environmental protection, and defense capabilities.
+
+Etymology
+
+The word science has been used in English since the 14th century (Middle English) in the sense of "the state of knowing".
+
+--- SECTION 2 (2959 chars) ---
+The word was borrowed from the Anglo-Norman language as the suffix -cience, which was borrowed from the Latin word scientia, meaning 'knowledge, awareness, understanding', a noun derivative of sciens meaning 'knowing', itself the present active participle of sciō 'to know'.[26]
+
+There are many hypotheses for science's ultimate word origin. According to Michiel de Vaan, Dutch linguist and Indo-Europeanist, sciō may have its origin in the Proto-Italic language as *skije- or *skijo- meaning 'to know', which may originate from Proto-Indo-European language as *skh1-ie, *skh1-io meaning 'to incise'. The Lexikon der indogermanischen Verben proposed sciō is a back-formation of nescīre, meaning 'to not know, be unfamiliar with', which may derive from Proto-Indo-European *sekH- in Latin secāre, or *skh2- from *sḱheh2(i)- meaning 'to cut'.[27]
+
+In the past, science was a synonym for "knowledge" or "study", in keeping with its Latin origin. A person who conducted scientific research was called a "natural philosopher" or "man of science".[28] In 1834, William Whewell introduced the term scientist in a review of Mary Somerville's book On the Connexion of the Physical Sciences,[29] crediting it to "some ingenious gentleman" (possibly himself).[30]
+
+History
+
+Main article: History of science
+
+Early history
+
+Main article: Science in the ancient world
+
+Megaliths from Nabta Playa, constructed by Neolithic populations to coordinate astronomical observations located in Aswan, Upper Egypt.[31]
+
+The Plimpton 322 tablet by the Babylonians records Pythagorean triples, written c. 1800 BCE
+
+Science has no single origin. Rather, scientific thinking emerged gradually over the course of tens of thousands of years,[32][33] taking different forms around the world, and few details are known about the very earliest developments. Women likely played a central role in prehistoric science,[34] as did religious rituals.[35] Some scholars use the term "protoscience" to label activities in the past that resemble modern science in some but not all features;[36][37][38] however, this label has also been criticised as denigrating,[39] or too suggestive of presentism, thinking about those activities only in relation to modern categories.[40]
+
+Direct evidence for scientific processes becomes clearer with the advent of writing systems in the Bronze Age civilisations of Ancient Egypt and Mesopotamia (c. 3000–1200 BCE), creating the earliest written records in the history of science.[13]: 12–15 [14] Although the words and concepts of "science" and "nature" were not part of the conceptual landscape at the time, the ancient Egyptians and Mesopotamians made contributions that would later find a place in Greek and medieval science: mathematics, astronomy, and medicine.[41][13]: 12
+
+From the 3rd millennium BCE, the ancient Egyptians developed a non-positional decimal numbering system,[42] solved practical problems using geometry,[43] and developed a calendar.
+
+--- SECTION 3 (3073 chars) ---
+[44] Their healing therapies involved drug treatments and the supernatural, such as prayers, incantations, and rituals.[13]: 9 Ancient Nubians pioneered early antibiotics and established a system of geometrics which served as the basis for initial sunclocks. Nubians also exercised a trigonometric methodology comparable to their Egyptian counterparts.[45][46][47][48]
+
+The ancient Mesopotamians used knowledge about the properties of various natural chemicals for manufacturing pottery, faience, glass, soap, metals, lime plaster, and waterproofing.[49] They studied animal physiology, anatomy, behaviour, and astrology for divinatory purposes.[50] The Mesopotamians had an intense interest in medicine and the earliest medical prescriptions appeared in Sumerian during the Third Dynasty of Ur.[49][51] They seem to have studied scientific subjects which had practical or religious applications and had little interest in satisfying curiosity.[49]
+
+Classical antiquity
+
+Main article: Science in classical antiquity
+
+Plato's Academy mosaic, made between 100 BCE and 79 CE, shows many Greek philosophers and scholars.
+
+In classical antiquity, there is no real ancient analogue of a modern scientist. Instead, well-educated, usually upper-class, and almost universally male individuals performed various investigations into nature whenever they could afford the time.[52] Before the invention or discovery of the concept of phusis or nature by the pre-Socratic philosophers, the same words tend to be used to describe the natural "way" in which a plant grows,[53] and the "way" in which, for example, one tribe worships a particular god. For this reason, it is claimed that these men were the first philosophers in the strict sense and the first to clearly distinguish "nature" and "convention".[54]
+
+The early Greek philosophers of the Milesian school, which was founded by Thales of Miletus and later continued by his successors Anaximander and Anaximenes, were the first to attempt to explain natural phenomena without relying on the supernatural.[55] The Pythagoreans developed a complex number philosophy[56]: 467–468 and contributed significantly to the development of mathematical science.[56]: 465 The theory of atoms was developed by the Greek philosopher Leucippus and his student Democritus.[57][58] Later, Epicurus would develop a full natural cosmology based on atomism, and would adopt a "canon" (ruler, standard) which established physical criteria or standards of scientific truth.[59] The Greek doctor Hippocrates established the tradition of systematic medical science[60][61] and is known as "The Father of Medicine".[62]
+
+A turning point in the history of early philosophical science was Socrates' example of applying philosophy to the study of human matters, including human nature, the nature of political communities, and human knowledge itself. The Socratic method as documented by Plato's dialogues is a dialectic method of hypothesis elimination: better hypotheses are found by steadily identifying and eliminating those that lead to contradictions.
+
+--- SECTION 4 (2919 chars) ---
+The Socratic method searches for general commonly held truths that shape beliefs and scrutinises them for consistency.[63] Socrates criticised the older type of study of physics as too purely speculative and lacking in self-criticism.[64]
+
+In the 4th century BCE, Aristotle created a systematic programme of teleological philosophy.[65] In the 3rd century BCE, Greek astronomer Aristarchus of Samos was the first to propose a heliocentric model of the universe, with the Sun at the centre and all the planets orbiting it.[66] Aristarchus's model was widely rejected because it was believed to violate the laws of physics,[66] while Ptolemy's Almagest, which contains a geocentric description of the Solar System, was accepted through the early Renaissance instead.[67][68] The inventor and mathematician Archimedes of Syracuse made major contributions to the beginnings of calculus.[69] Pliny the Elder was a Roman writer and polymath, who wrote the seminal encyclopaedia Natural History.[70][71][72]
+
+Positional notation for representing numbers likely likely emerged between the 3rd and 5th centuries CE along Indian trade routes. This numeral system adwda asdawd asmade efficient arithmetic operations more accessible and would eventually become standard for mathematics worldwide.[73]
+
+Middle Ages
+
+Main article: History of science § Middle Ages
+
+The first page of Vienna Dioscurides depicts a peacock, made in the 6th century.
+
+Due to the collapse of the Western Roman Empire, the 5th century saw an intellectual decline, with knowledge of classical Greek conceptions of the world deteriorating in Western Europe.[13]: 194 Latin encyclopaedists of the period such as Isidore of Seville preserved the majority of general ancient knowledge.[74] In contrast, because the Byzantine Empire resisted attacks from invaders, they were able to preserve and improve prior learning.[13]: 159 John Philoponus, a Byzantine scholar in the 6th century, started to question Aristotle's teaching of physics, introducing the theory of impetus.[13]: 307, 311, 363, 402 His criticism served as an inspiration to medieval scholars and Galileo Galilei, who extensively cited his works ten centuries later.[13]: 307–308 [75]
+
+During late antiquity and the Early Middle Ages, natural phedawdacdnomena were mainly examined via the Aristotelian approach. The approach includes Aristotle's four causes: material, formal, moving, and final cause.[76] Many Greek classical texts were preserved by the Byzantine Empire and Arabic translations were made by Christians, mainly Nestorians and Miaphysites. Under the Abbasids, these Arabic translations were later improved and developed by Arabic scientists.[14]: 62–67 By the 6th and 7th centuries, the neighbouring Sasanian Empire established the medical Academy of Gondishapur, which was considered by Greek, Syriac, and Persian physicians as the most important medical hub of the ancient world.
+
+--- SECTION 5 (3026 chars) ---
+[77]
+
+Islamic study of Aristotelianism flourished in the House of Wisdom established in the Abbasid capital of Baghdad, Iraq[78] and the flourished[79] until the Mongol invasions in the 13th century. Ibn al-Haytham, better known as Alhazen, used controlled experiments in his optical study.[a][81][82] Avicenna's compilation of The Canon of Medicine, a medical encyclopaedia, is considered to be one of the most important publications in medicine and was used until the 18th century.[83]
+
+By the 11th century most of Europe had become Christian,[13]: 204 and in 1088, the University of Bologna emerged as the first university in Europe.[84] As such, demand for Latin translation of ancient and scientific texts grew,[13]: 204 a major contributor to the Renaissance of the 12th century. Renaissance scholasticism in western Europe flourished, with experiments done by observing, describing, and classifying subjects in nature.[85] In the 13th century, medical teachers and students at Bologna began opening human bodies, leading to the first anatomy textbook dawdaw adbased on human dissection by Mondino de Luzzi.[86]
+
+Renaissance
+
+Main articles: Science in the Renaissance and Copernican heliocentrism
+
+Drawing of the heliocentric model as proposed by the Copernicus's De revolutionibus orbium coelestium
+
+New developments in optics played a role in the inception of the Renaissance, both by challenging long-held metaphysical ideas on perception, as well as by contributing to the improvement and development of technology such as the camera obscura and the telescope. At the start of the Renaissance, Roger Bacon, Vitello, and John Peckham each built up a scholastic ontology upon a causal chain beginning with sensation, perception, and finally apperception of the individual and universal forms of Aristotle.[80]: Book I A model of vision later known as perspectivism was exploited and studied by the artists of the Renaissance. This theory uses only three of Aristotle's four causes: formal, material, and final.[87]
+
+In the 16th century, Nicolaus Copernicus formulated a heliostatic model of the Solar System, with the Sun positioned near the center of the Universe,[88][89] motionless, with Earth and the other planets orbiting around it in circular motions,[90] modified by epicycles, and at uniform speeds. The Copernican model challenged the dominant geocentric model of Ptolemy, which had placed Earth at the center of the Universe. 16th-century astronomers bedwdalieved that Copernicus' elimination of the equant was his chief achievement[91] but his model never displaced Ptolemy's, which only fell out of favor 70 years later after Galileo's telescopic observations of 1610.[92]
+
+Scientific Revolution
+
+Main article: Scientific Revolution
+
+Johannes Kepler and others challenged the notion that the only function of the eye is perception, and shifted the main focus in optics from the eye to the propagation of light.[87][93] Kepler is best known, however, for the discovery of Kepler's laws of planetary motion.
+
+--- SECTION 6 (3060 chars) ---
+Kepler did not reject Aristotelian metaphysics and described his work as a search for the Harmony of the Spheres.[94] Galileo had made significant contributions to astronomy, physics and engineering. However, he became persecuted after Pope Urban VIII sentenced him for wradwiting about the heliocentric model.[95]
+
+The printing press was widely used to publish scholarly arguments, including some that disagreed widely with contemporary ideas of nature.[96] Francis Bacon and René Descartes published philosophical arguments in favour of a new type of non-Aristotelian science. Bacon emphasised the importance of experiment over contemplation, questioned the Aristotelian concepts of formal and final cause, promoted the idea that science should study the laws of nature and the improvement of all human life.[97] Descartes emphasised individual thought and argued that mathematics rather than geometry should be used to study nature.[98]
+
+Age of Enlightenment
+
+Main article: Science in the Age of Enlightenment
+
+Title page of the 1687 first edition of Philosophiæ Naturalis Principia Mathematica by Isaac Newton
+
+At the start of the Age of Enlightenment, Isaac Newton formed the foundation of classical mechanics by his Philosophiæ Naturalis Principia Mathematica greatly influencing future physicists.[99] Gottfried Wilhelm Leibniz incorporated terms from Aristotelian physics, now used in a new non-teleological way. This implied a shift in the view of objects: objects were now considered as having no innate goals. Leibniz assumed that different types of things all work according to the same general laws of nature, with no special formal or final causes.[100]
+
+During this time the declared purpose and value of science became producing wealth and inventions that would improve human lives, in the materialistic sense of having more food, clothing, and other things. In Bacon's words, "the real and legitimate goal of sciences is the endowment of human life with new inventions and riches", and he discouraged scientists from pursuing intangible philosophical or spiritual ideas, which he believed contributed little to human happiness beyond "the fume of subtle, sublime or pleasing [speculation]".[101]
+
+Science during the Enlightenment was dominated by scientific societies and academies,[102] which had largely replaced universities as centres of scientific research and development. Societies and academies were the backbones of the maturation of the scientific profession. Another important development was the popularisation of science among an increasingly literate population.[103] Enlightenment philosophers turned to a few of their scientific predecessors – Galileo, Kepler, Boyle, and Newton principally – as the guides to every physical and social field of the day.[104][105]
+
+The 18th century saw significant advancements in the practice of medicine[106] and physics;[107] the development of biological taxonomy by Carl Linnaeus;[108] a new understanding of magnetism and electricity;[109] and the maturation of chemistry as a discipline.
+
+--- SECTION 7 (642 chars) ---
+[110] Ideas on human nature, society, and economics evolved during the Enlightenment. Hume and other Scottish Enlightenment thinkers developed A Treatise of Human Nature, which was expressed historically in works by authors including James Burnett, Adam Ferguson, John Millar and William Robertson, all of whom merged a scientific study of how humans behaved in ancient and primitive cultures with a strong awareness of the determining forces of modernity.[111] Modern sociology largely originated from this movement.[112] In 1776, Adam Smith published The Wealth of Nations, which is often considered the first work on modern economics.[113]
