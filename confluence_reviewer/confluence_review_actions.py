@@ -1088,7 +1088,7 @@ class ReviewActions:
             "guidelines": count_matches(guideline_indicators, combined_text),
         }
 
-        doc_type = max(scores, key=scores.get)
+        doc_type = max(scores, key=lambda x: scores[x])
         return doc_type if scores[doc_type] > 0 else "generic"
 
     def _get_type_specific_checks(self, doc_type: str) -> list:
@@ -1146,7 +1146,24 @@ class ReviewActions:
             if infos:
                 sev_parts.append(f"{infos} info")
             sections.append(f"<p>Severity breakdown: {', '.join(sev_parts)}</p>")
-
+        type_names = {
+                "grammar": "Grammar & spelling",
+                "misspelling": "Misspelling",
+                "context_noise": "Suspicious/malformed words",
+                "repeated_word": "Repeated words",
+                "long_sentence": "Long sentences",
+                "long_paragraph": "Long paragraphs",
+                "structure": "Page structure",
+                "statistics_validation": "Data/statistics consistency",
+                "citation": "Citation & references",
+                "readability": "Readability",
+                "duplicate_content": "Duplicate content",
+                "table_validation": "Table/data validation",
+                "spelling_consistency": "Spelling consistency",
+                "capitalization_consistency": "Capitalization consistency",
+                "metric_inconsistency": "Metric inconsistency",
+            }
+        
         # Readability score if available
         readability = state.get("readability")
         if readability:
@@ -1168,23 +1185,7 @@ class ReviewActions:
         if issue_types:
             sections.append("<p>Issues by type:</p>")
             items = []
-            type_names = {
-                "grammar": "Grammar & spelling",
-                "misspelling": "Misspelling",
-                "context_noise": "Suspicious/malformed words",
-                "repeated_word": "Repeated words",
-                "long_sentence": "Long sentences",
-                "long_paragraph": "Long paragraphs",
-                "structure": "Page structure",
-                "statistics_validation": "Data/statistics consistency",
-                "citation": "Citation & references",
-                "readability": "Readability",
-                "duplicate_content": "Duplicate content",
-                "table_validation": "Table/data validation",
-                "spelling_consistency": "Spelling consistency",
-                "capitalization_consistency": "Capitalization consistency",
-                "metric_inconsistency": "Metric inconsistency",
-            }
+            
             # Sort: errors first, then warnings, then info
             sev_order = {"error": 0, "warning": 1, "info": 2}
             type_sev = {}

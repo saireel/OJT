@@ -242,6 +242,8 @@ class GitHubAPI:
             try:
                 # Get file content at head SHA
                 base_sha, head_sha = self.get_base_and_head_sha(repo, pr_number)
+                if not head_sha:
+                    continue
                 content = self.get_file_content_at_ref(repo, py_file, head_sha)
                 
                 if not content:
@@ -330,6 +332,8 @@ class GitHubAPI:
                     continue
 
                 try:
+                    if not head_sha:
+                        continue
                     content = self.get_file_content_at_ref(repo, file_path, head_sha)
                     if content:
                         file_contents[file_path] = content
@@ -390,6 +394,70 @@ class GitHubAPI:
             return {"error": str(e), "total_issues": 0}
 
 
+
+    # ------------------------------------------------------------------ #
+    # Fetch review instructions from repo                                #
+    # ------------------------------------------------------------------ #
+
+    # Common file names for review instruction documents
+    _INSTRUCTION_FILE_CANDIDATES = [
+        "INSTRUCTIONS.md",
+        "instructions.md",
+        "REVIEW_INSTRUCTIONS.md",
+        "review_instructions.md",
+        "REVIEW.md",
+        "review.md",
+        "PR_REVIEW.md",
+        "pr_review.md",
+        "CHECKLIST.md",
+        "checklist.md",
+        ".github/INSTRUCTIONS.md",
+        ".github/instructions.md",
+        ".github/REVIEW_INSTRUCTIONS.md",
+        ".github/review_instructions.md",
+        ".github/PR_REVIEW.md",
+        ".github/CHECKLIST.md",
+        "docs/INSTRUCTIONS.md",
+        "docs/instructions.md",
+        "docs/REVIEW_INSTRUCTIONS.md",
+        "docs/review_instructions.md",
+    ]
+
+    def fetch_review_instructions(self, repo: str, ref: str = "main") -> dict:
+        """
+        Search the repository for a review instruction/checklist markdown file.
+
+        Scans a list of common file paths for instruction documents.
+        Returns the first one found, decoded as UTF-8 text.
+
+        :param repo: Repository name.
+        :param ref:  Git ref to search (branch, tag, or SHA). Defaults to "main".
+        :return: Dict with keys:
+                 - "found": bool
+                 - "file_path": str (path that matched, or "")
+                 - "content": str (file content, or "")
+                 - "ref": str (the ref used)
+        """
+        for candidate in self._INSTRUCTION_FILE_CANDIDATES:
+            content = self.get_file_content_at_ref(repo, candidate, ref)
+            if content:
+                print(f"Found review instructions: {candidate} (ref: {ref})")
+                return {
+                    "found": True,
+                    "file_path": candidate,
+                    "content": content,
+                    "ref": ref,
+                }
+
+        # Also try the PR's head branch if ref was explicit
+        print(f"No review instruction file found in {repo} at ref '{ref}'.")
+        return {
+            "found": False,
+            "file_path": "",
+            "content": "",
+            "ref": ref,
+        }
+
     def review_pull_request(self, repo: str, pr_number: int, checklist: list):
         """
         Review a single pull request based on the provided checklist.
@@ -406,13 +474,26 @@ class GitHubAPI:
                         id, name, description, enabled, execution_order
         :return: None
         """
-        # Get PR details
+         # Get PR details
         head_sha = self.get_base_and_head_sha(repo, pr_number)[1]
+        
+        # Add this guard clause
+        if not head_sha:
+            print(f"Failed to get PR #{pr_number} details (head_sha is None).")
+            return
+        
         pr_title = next(
             (pr["title"] for pr in self.list_pull_requests(repo) if pr["number"] == pr_number),
             "Unknown PR",
         )
         print(f"\nReviewing PR #{pr_number}: {pr_title}")
+
+        # Auto-fetch review instructions from the repository
+        instructions = self.fetch_review_instructions(repo, ref=head_sha)
+        if instructions["found"]:
+            print(f"Using review instructions from: {instructions['file_path']}")
+        else:
+            print("No review instruction file found; using default review behavior.")
 
         files = self.get_files_in_pr(repo, pr_number)
         if not files:
@@ -472,6 +553,12 @@ class GitHubAPI:
             f"- Files changed: {len(files)}",
             f"- Checklist checks executed: {len(enabled_items)}",
         ]
+
+        # Include instruction file info in summary
+        if instructions["found"]:
+            summary_lines.append(
+                f"- Review instructions: `{instructions['file_path']}` (ref: {instructions['ref'][:7]})"
+            )
 
         if flake8_count == 0:
             summary_lines.append("- Flake8: Approved (0 issues).")

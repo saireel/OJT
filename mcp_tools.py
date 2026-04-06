@@ -365,7 +365,7 @@ def show_comments_tool(repo: str, pr_number: int):
         - dict: {"success": True, "data": {...}} If reply is posted
                 {"success": False, "error": "error message"} if posting fails
           """)
-def reply_comment_tool(repo: str, pr_number: str, comment_id: int, reply_text: str):
+def reply_comment_tool(repo: str, pr_number: int, comment_id: int, reply_text: str):
     return reply_comment(repo, pr_number, comment_id, reply_text)
 
 @mcp.tool(description=

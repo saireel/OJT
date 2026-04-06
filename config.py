@@ -4,7 +4,7 @@ CONFLUENCE_API_TOKEN = "ATATT3xFfGF0kbRUuadxD3wlnpC1qTXexiTDRO1AdIc0LSUUUpUMFsA4
 "6p3vT3PU-RKihDj2YkjlgoCoIaHQCGy7AaitSpIfZVEgB7y-Mk=A05B7262"
 
 BASE_URL = "https://xyreel.atlassian.net/wiki"
-GITHUB_TOKEN = "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"
+GITHUB_TOKEN = "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"
 GITHUB_OWNER = "saireel"
 GITHUB_BASE_URL = "https://api.github.com"
 REVIEW_CHECKLIST_PAGE_ID = ""
