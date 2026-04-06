@@ -5,8 +5,8 @@
 import re
 from typing import Any, Dict, List
 
-from confluence import confluence_api, ReviewActions, SyntaxActions
-from github_functions import github_api
+from confluence_reviewer import confluence_api, ReviewActions, SyntaxActions
+from github_reviewer.github_functions import github_api
 
 # Shared instances (created once, reused across all calls)
 syntax_actions = SyntaxActions(confluence_api)
@@ -204,7 +204,7 @@ def show_comments(repo: str, pr_number: int):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def reply_comment(repo: str, pr_number: str, comment_id: int, reply_text: str):
+def reply_comment(repo: str, pr_number: int, comment_id: int, reply_text: str):
     try:
         result = github_api.reply_comment(repo, pr_number, comment_id, reply_text)
         return {"success": True, "data": result}

@@ -210,6 +210,7 @@ class SyntaxActions:
         text, error = self._get_page_plain_text(page_id)
         if error:
             return None, error
+        text = text or ""
 
         if chunk_size < 1:
             return None, "chunk_size must be greater than 0"

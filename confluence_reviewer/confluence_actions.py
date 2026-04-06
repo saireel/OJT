@@ -93,7 +93,7 @@ class ConfluenceAPI:
             params={"expand": "body.storage"}
         )
 
-        if error:
+        if error or response is None:
             return None, error
 
         try:
@@ -202,8 +202,8 @@ class ConfluenceAPI:
 
         if page_text is None:
             page_text, error = syntax_actions._get_page_plain_text(page_id)
-            if error:
-                return None, error
+            if error or not page_text:
+                return None, error or "Failed to get page text"
 
         selection = syntax_actions._normalize_inline_text(text_selection)
         if not selection:
@@ -234,7 +234,7 @@ class ConfluenceAPI:
         }
 
         response, error = self._request("POST", path, json=payload)
-        if error:
+        if error or response is None:
             return None, error
 
         try:
