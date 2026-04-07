@@ -71,6 +71,16 @@ class ReviewActions:
         original_position: Optional[int] = None,
     ) -> None:
         """Try to post an inline comment with candidate expansion and state tracking."""
+        # If deferring, queue for later (footer posts first)
+        if state.get("_defer_inline"):
+            state["_deferred_inlines"].append({
+                "page_id": page_id,
+                "comment": comment,
+                "anchors": list(anchors),
+                "original_position": original_position,
+            })
+            return
+
         time.sleep(0.3)
 
         # Fetch page text once (cached in state to avoid repeat fetches across calls)
@@ -103,9 +113,11 @@ class ReviewActions:
             )
             if result is not None and not error:
                 state["comments_posted"] += 1
+                logger.info("[REVIEW] Inline comment posted (anchor=%s)", option[:80])
                 return True
             if error:
                 last_error = error
+                logger.debug("[REVIEW] Inline anchor failed: %s | error: %s", option[:60], error)
             return False
 
         # Phase 1: try each raw anchor as-is
@@ -129,6 +141,7 @@ class ReviewActions:
                     fallback_anchor = normalized
                     break
 
+        logger.warning("[REVIEW] Inline comment failed after %d attempts | comment: %s | last_error: %s", len(attempted), comment[:80], last_error or "No matching anchor")
         state["inline_failures"].append({
             "comment": comment,
             "error": last_error or "No matching anchor found",
@@ -141,15 +154,19 @@ class ReviewActions:
 
     def _run_grammar_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Run grammar and spelling checks, then record or post the findings."""
+        logger.info("[REVIEW] Running grammar check for page %s (%d chars)", page_id, len(text))
         result, error = self.syntax._collect_language_issues_adaptive(text)
         if error:
+            logger.warning("[REVIEW] Grammar check error: %s", error)
             state["footer_notes"].append(error)
             return
 
         if not result:
+            logger.info("[REVIEW] Grammar check: no issues found")
             return
 
         state["language_issues_found"] = int(result.get("issues_found", 0))
+        logger.info("[REVIEW] Grammar check found %d issues", state["language_issues_found"])
         for issue in result.get("issues", []):
             issue_type = str(issue.get("type", "grammar") or "grammar").lower()
             if issue_type not in {"grammar", "misspelling", "typographical", "style"}:
@@ -192,6 +209,7 @@ class ReviewActions:
 
     def _run_context_noise_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Detect suspicious tokens or malformed terms that may need manual review."""
+        logger.info("[REVIEW] Running context_noise check")
         seen = set()
 
         # Pattern 1: Original — very long words (18+ chars) or words with embedded digits
@@ -276,6 +294,7 @@ class ReviewActions:
 
     def _run_repeated_word_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Find repeated consecutive words and flag them as readability issues."""
+        logger.info("[REVIEW] Running repeated_word check")
         pattern = re.compile(r"\b([A-Za-z']{2,})\s+\1\b", re.IGNORECASE)
         seen = set()
         for match in pattern.finditer(text):
@@ -297,6 +316,7 @@ class ReviewActions:
 
     def _run_long_sentence_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Flag long sentences that may be harder to read or review."""
+        logger.info("[REVIEW] Running long_sentence check")
         sentence_pattern = re.compile(r"[^.!?\n]+[.!?]?")
         flagged = 0
 
@@ -324,6 +344,7 @@ class ReviewActions:
 
     def _run_long_paragraph_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Flag oversized paragraphs that would benefit from being split up."""
+        logger.info("[REVIEW] Running long_paragraph check")
         paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
         flagged = 0
         for paragraph in paragraphs:
@@ -344,6 +365,7 @@ class ReviewActions:
 
     def _run_structure_check(self, storage: str, state: Dict[str, Any]) -> None:
         """Inspect heading and paragraph structure for obvious organization issues."""
+        logger.info("[REVIEW] Running structure check")
         headings = re.findall(r"<h[1-6][^>]*>", storage or "", flags=re.IGNORECASE)
         paragraphs = re.findall(r"<p[^>]*>", storage or "", flags=re.IGNORECASE)
 
@@ -365,6 +387,7 @@ class ReviewActions:
 
     def _run_statistics_validation_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Validate statistical claims: percentages, counts, breakdowns, and consistency."""
+        logger.info("[REVIEW] Running statistics_validation check")
         def _close_enough(a: float, b: float, tol: float = 0.5) -> bool:
             return abs(a - b) <= tol
 
@@ -633,6 +656,7 @@ class ReviewActions:
 
     def _run_consistency_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Check for consistency issues: spelling variations, metric values, capitalization."""
+        logger.info("[REVIEW] Running consistency check")
         term_patterns = {
             "Project X": [r"Project\s+X", r"ProjectX", r"Proj\s+X", r"project\s+x"],
             "Database": [r"\bDatabase\b", r"\bDB\b", r"\bdata base\b", r"\bdb\b"],
@@ -705,6 +729,7 @@ class ReviewActions:
     # ------------------------------------------------------------------
     def _run_citation_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Flag broken, placeholder, or inconsistent citations."""
+        logger.info("[REVIEW] Running citation check")
         # Placeholder citations
         placeholder_pats = [
             (r"\[(?:X|x|\?|citation needed|ref|TODO)\]", "Placeholder citation found"),
@@ -769,6 +794,7 @@ class ReviewActions:
 
     def _run_readability_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Compute Flesch-Kincaid readability and flag hard-to-read sections."""
+        logger.info("[REVIEW] Running readability check")
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.split()) >= 3]
         if len(sentences) < 3:
             return
@@ -840,6 +866,7 @@ class ReviewActions:
     # ------------------------------------------------------------------
     def _run_duplicate_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Detect near-duplicate paragraphs using TF-IDF cosine similarity."""
+        logger.info("[REVIEW] Running duplicate_content check")
         paragraphs = [p.strip() for p in text.split("\n\n") if len(p.split()) >= 10]
         if len(paragraphs) < 2:
             return
@@ -923,6 +950,7 @@ class ReviewActions:
     # ------------------------------------------------------------------
     def _run_table_validation_check(self, page_id: str, storage: str, text: str, state: Dict[str, Any]) -> None:
         """Validate tables extracted from page storage HTML."""
+        logger.info("[REVIEW] Running table_validation check")
         tables = self.syntax._extract_tables_from_storage(storage)
         if not tables:
             return
@@ -1262,16 +1290,22 @@ class ReviewActions:
 
     def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Run the full page review workflow using the configured checklist source."""
+        logger.info("[REVIEW] === Starting review for page_id=%s checklist_page_id=%s ===", page_id, checklist_page_id or "(default)")
         if not page_id:
+            logger.error("[REVIEW] page_id is required")
             return None, "page_id is required"
 
         storage, error = self.api.get_page_storage(page_id)
         if error:
+            logger.error("[REVIEW] Failed to fetch page storage: %s", error)
             return None, error
+        logger.info("[REVIEW] Fetched page storage (%d chars)", len(storage))
 
         text = self.syntax._extract_plain_text_from_storage(storage)
         if not text:
+            logger.error("[REVIEW] Page content is empty after extraction")
             return None, "Page content is empty"
+        logger.info("[REVIEW] Extracted plain text (%d chars)", len(text))
 
         state = {
             "issues": [],
@@ -1284,11 +1318,14 @@ class ReviewActions:
             "executed_checks": [],
             "skipped_checks": [],
             "_cached_page_text": text,
+            "_defer_inline": True,
+            "_deferred_inlines": [],
         }
 
         title = self.api._get_document_title(page_id) or "Untitled"
         doc_type = self._classify_document_type(title, text)
         type_specific_checks = self._get_type_specific_checks(doc_type)
+        logger.info("[REVIEW] Page title=%r, doc_type=%s, applicable_checks=%s", title, doc_type, type_specific_checks)
 
         check_handlers = {
             "grammar": lambda: self._run_grammar_check(page_id, text, state),
@@ -1317,41 +1354,70 @@ class ReviewActions:
                 continue
 
             if not check.get("enabled", True):
+                logger.info("[REVIEW] Skipping check %r (disabled)", check_id)
                 state["skipped_checks"].append({"id": check_id, "reason": "disabled"})
                 continue
 
             if check_id not in type_specific_checks:
+                logger.info("[REVIEW] Skipping check %r (not relevant for %s)", check_id, doc_type)
                 state["skipped_checks"].append({"id": check_id, "reason": f"not relevant for {doc_type}"})
                 continue
 
             required_env = str(check.get("required_env", "")).strip()
             if required_env and not self._is_env_enabled(required_env):
+                logger.info("[REVIEW] Skipping check %r (env %s not enabled)", check_id, required_env)
                 state["skipped_checks"].append({"id": check_id, "reason": f"env {required_env} is not enabled"})
                 continue
 
             handler = check_handlers.get(check_id)
             if handler is None:
+                logger.warning("[REVIEW] Skipping check %r (no handler registered)", check_id)
                 state["skipped_checks"].append({"id": check_id, "reason": "no handler registered"})
                 continue
 
+            logger.info("[REVIEW] >>> Running check: %s", check_id)
+            check_start = time.time()
             handler()
+            check_elapsed = time.time() - check_start
             state["executed_checks"].append(check_id)
+            logger.info("[REVIEW] <<< Finished check: %s (%.1fs, issues so far: %d, inline posted: %d)", check_id, check_elapsed, len(state["issues"]), state["comments_posted"])
+
+        # --- Phase 2: Post footer FIRST (single API call, before rate limits hit) ---
+        logger.info("[REVIEW] Building footer summary (%d issues found, %d deferred inline comments)", len(state["issues"]), len(state["_deferred_inlines"]))
+        footer_comment = self._build_footer_review_comment(state)
+        footer_response, footer_error = None, None
+        for attempt in range(3):
+            delay = 2 * (attempt + 1)
+            logger.info("[REVIEW] Footer post attempt %d/3 (delay=%ds)", attempt + 1, delay)
+            time.sleep(delay)
+            footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
+            if footer_response is not None and not footer_error:
+                logger.info("[REVIEW] Footer posted successfully on attempt %d", attempt + 1)
+                break
+            logger.warning("[REVIEW] Footer post failed on attempt %d: %s", attempt + 1, footer_error)
+        footer_posted = footer_response is not None and not footer_error
+
+        # --- Phase 3: Now post deferred inline comments ---
+        state["_defer_inline"] = False
+        deferred = state.pop("_deferred_inlines", [])
+        logger.info("[REVIEW] Posting %d deferred inline comments", len(deferred))
+        for item in deferred:
+            self._post_issue_inline(
+                item["page_id"],
+                state,
+                item["comment"],
+                *item["anchors"],
+                original_position=item.get("original_position"),
+            )
 
         if state["inline_failures"]:
             state["footer_notes"].append(f"{len(state['inline_failures'])} issue(s) could not be attached inline")
 
-        footer_comment = self._build_footer_review_comment(state)
-        # Retry footer post up to 3 times with increasing delay to handle rate limits
-        footer_response, footer_error = None, None
-        for attempt in range(3):
-            time.sleep(1 + attempt)
-            footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
-            if footer_response is not None and not footer_error:
-                break
-        if footer_response is not None and not footer_error and state["footer_fallback_comments"]:
+        if footer_posted and state["footer_fallback_comments"]:
             state["footer_fallback_comments_posted"] = 1
-        footer_posted = footer_response is not None and not footer_error
 
+        logger.info("[REVIEW] === Review complete for page %s: %d issues, %d inline posted, %d inline failed, footer=%s ===",
+                     page_id, len(state["issues"]), state["comments_posted"], len(state["inline_failures"]), "posted" if footer_posted else "FAILED")
         severity_counts = Counter(i.get("severity", "info") for i in state["issues"])
         return {
             "page_id": page_id,

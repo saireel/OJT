@@ -40,7 +40,7 @@ class MCPClient:
                 [sys.executable, MCP_SERVER_SCRIPT],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=None,  # Inherit stderr so MCP/review logs appear in Flask terminal
                 cwd=MCP_SERVER_DIR,
                 env=env,
             )
@@ -233,14 +233,71 @@ def index():
     return render_template("index.html")
 
 
+
+
+# -- Tool Descriptions for Copilot ------------------------------------
+
+AVAILABLE_TOOLS = """
+You have access to the following tools. When the user's request requires using a tool, respond with EXACTLY this format:
+TOOL_CALL: <tool_name>
+ARGS: <json_arguments>
+
+Available tools:
+
+1. review_confluence_page_content
+   - Reviews a Confluence page for grammar, structure, readability, etc. and posts inline comments + footer summary directly on the page.
+   - Args: {"page_id": "...", "checklist_page_id": "(optional) page ID with custom review instructions"}
+   - Use when: user wants to review a Confluence page, post comments, check quality, apply a checklist, etc.
+
+2. get_page_content_by_sections_tool
+   - Fetches the content of a Confluence page (read-only, does NOT post anything).
+   - Args: {"page_id": "..."}
+   - Use when: user wants to read, summarize, or ask questions about a Confluence page.
+
+3. post_confluence_footer_comment
+   - Posts a single footer comment on a Confluence page.
+   - Args: {"page_id": "...", "comment": "..."}
+   - Use when: user wants to post a specific comment on a page footer.
+
+4. post_confluence_inline_comment
+   - Posts an inline comment on specific text within a Confluence page.
+   - Args: {"page_id": "...", "comment": "...", "text_selection": "exact text to attach comment to"}
+   - Use when: user wants to comment on a specific part of a page.
+
+5. review_pull_request_tool
+   - Reviews a GitHub pull request and posts review comments.
+   - Args: {"repo": "repo_name", "pr_number": 123, "checklist": []}
+   - Use when: user wants to review a GitHub PR.
+
+6. get_confluence_page_content
+   - Gets raw Confluence page content.
+   - Args: {"page_id": "..."}
+   - Use when: user needs the full raw content of a page.
+
+7. update_confluence_page
+   - Updates the content of a Confluence page.
+   - Args: {"page_id": "...", "title": "...", "content": "...", "version": 1, "message": "..."}
+   - Use when: user wants to edit/update a Confluence page.
+
+IMPORTANT PATTERNS:
+- If the user provides TWO Confluence links and says to "follow instructions" or "apply instructions" from one to the other, use review_confluence_page_content with the instruction page as checklist_page_id and the other as page_id.
+- If the user provides ONE Confluence link and asks to review/check it, use review_confluence_page_content with just page_id.
+- If the user provides a link and asks to read/summarize/explain it, use get_page_content_by_sections_tool.
+- Always use a tool when the user provides a link. Do NOT ask for clarification if you can infer the intent.
+
+If the user's request does NOT require any tool (e.g. general questions, greetings), just respond normally without TOOL_CALL.
+"""
+
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
     user_msg = data.get("prompt", "").strip()
+    history = data.get("history", [])
     if not user_msg:
         return jsonify({"error": "Empty prompt"}), 400
 
-    # Detect Confluence page links
+    # Extract any detected links for badge display
     conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
     page_ids: list[str] = []
     for url in conf_urls:
@@ -248,175 +305,178 @@ def chat():
         if pid and pid not in page_ids:
             page_ids.append(pid)
 
-    # Detect GitHub PR links
     pr_urls = re.findall(r"https?://github\.com/[^\s]+/pull/\d+", user_msg)
     prs: list[dict] = []
-    seen_prs: set[tuple[str, str, int]] = set()
     for url in pr_urls:
         info = extract_pr_info(url)
         if info:
-            key = (info["owner"], info["repo"], info["pr_number"])
-            if key not in seen_prs:
-                seen_prs.add(key)
-                prs.append(info)
+            prs.append(info)
 
-    # No links -- plain Copilot chat
-    if not page_ids and not prs:
-        response, err = send_to_copilot(user_msg)
-        if err:
-            return jsonify({"error": err}), 502
-        return jsonify({"response": response})
-
-    # Confluence pages detected
-    if page_ids:
-        return handle_confluence(user_msg, page_ids)
-
-    # GitHub PRs detected
-    if prs:
-        return handle_pr(user_msg, prs)
-
-    return jsonify({"error": "Could not process request"}), 400
-
-
-# -- Confluence Handler --------------------------------------------------
-
-def _is_review_request(user_msg: str) -> bool:
-    """Check if the user is asking to apply instructions/review one page using another."""
-    review_keywords = [
-        r"apply.*(?:instructions|checklist|rules|guidelines)",
-        r"review.*page",
-        r"use.*instructions.*(?:on|to|for)",
-        r"follow.*instructions.*(?:on|to|for)",
-        r"check.*page.*(?:using|with|from)",
-    ]
-    msg_lower = user_msg.lower()
-    return any(re.search(p, msg_lower) for p in review_keywords)
-
-
-def _identify_roles(user_msg: str, conf_urls: list[str], page_ids: list[str]) -> tuple[str | None, str | None]:
-    """Identify which page is the checklist and which is the target based on surrounding text.
-    Returns (checklist_id, target_id). Either may be None if not identified."""
-    msg_lower = user_msg.lower()
-
-    checklist_patterns = [
-        r"(?:use|follow|from|using)\s+(?:the\s+)?(?:instructions|checklist|rules|guidelines)\s+(?:from|on|in)\s+",
-        r"(?:instructions|checklist|rules|guidelines)\s+(?:from|on|in)\s+",
-    ]
-    target_patterns = [
-        r"(?:apply|review|check|use)\s+(?:it\s+)?(?:on|to|for)\s+(?:this\s+)?(?:page)?\s*",
-        r"(?:on|to|for)\s+(?:this\s+)?page\s*",
-    ]
-
-    checklist_id = None
-    target_id = None
-
-    # For each URL, check if its surrounding text matches checklist or target patterns
-    for i, url in enumerate(conf_urls):
-        url_pos = msg_lower.find(url.lower())
-        if url_pos < 0:
-            continue
-        # Get text before this URL (up to 100 chars)
-        before_text = msg_lower[max(0, url_pos - 100):url_pos]
-
-        for pattern in checklist_patterns:
-            if re.search(pattern, before_text):
-                checklist_id = page_ids[i]
-                break
-        for pattern in target_patterns:
-            if re.search(pattern, before_text):
-                target_id = page_ids[i]
-                break
-
-    # If we identified one but not the other, assign the remaining page
-    if len(page_ids) == 2:
-        if checklist_id and not target_id:
-            target_id = [pid for pid in page_ids if pid != checklist_id][0]
-        elif target_id and not checklist_id:
-            checklist_id = [pid for pid in page_ids if pid != target_id][0]
-
-    return checklist_id, target_id
-
-
-def handle_confluence(user_msg: str, page_ids: list[str]):
     detected = [f"confluence:{pid}" for pid in page_ids]
+    detected += [f"pr:{p['owner']}/{p['repo']}#{p['pr_number']}" for p in prs]
 
-    # Re-extract URLs in order to match them to page_ids positionally
-    conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
+    # Build prompt with tool descriptions and conversation history
+    history_context = ""
+    if history:
+        recent = history[-20:]
+        parts = []
+        for entry in recent:
+            role = "User" if entry.get("role") == "user" else "Assistant"
+            parts.append(f"{role}: {entry.get('text', '')}")
+        history_context = "Conversation history:\n" + "\n".join(parts) + "\n\n"
 
-    # If multiple pages and user wants to apply instructions/review,
-    # use MCP review tool to post comments directly on the Confluence page
-    if len(page_ids) >= 2 and _is_review_request(user_msg):
-        checklist_id, target_id = _identify_roles(user_msg, conf_urls, page_ids)
+    # Build context about detected links so Copilot knows the page IDs
+    link_context = ""
+    if page_ids:
+        link_context += "Detected Confluence page IDs from the user's message:\n"
+        for i, pid in enumerate(page_ids):
+            link_context += f"  Link {i+1}: page_id = \"{pid}\"\n"
+        link_context += "\n"
+    if prs:
+        link_context += "Detected GitHub PRs from the user's message:\n"
+        for p in prs:
+            owner, repo, pr_num = p["owner"], p["repo"], p["pr_number"]
+            link_context += f"  PR: {owner}/{repo}#{pr_num}\n"
+        link_context += "\n"
 
-        if checklist_id and target_id:
-            print(f"[DEBUG] Confluence review: checklist={checklist_id}, target={target_id}", flush=True)
-            result = mcp_client.call_tool("review_confluence_page_content", {
-                "page_id": target_id,
-                "checklist_page_id": checklist_id,
-            })
-            print(f"[DEBUG] Confluence review result: {str(result)[:300]}", flush=True)
-
-            if not result.get("success"):
-                return jsonify({"error": result.get("error", "Confluence review failed"), "detected": detected}), 502
-
-            review_data = result.get("data", {})
-            summary = f"Review completed and comments posted to Confluence page {target_id}.\n\n{format_result(review_data)}"
-            return jsonify({"response": summary, "detected": detected})
-
-    # Otherwise, fetch content and send to Copilot for a general response
-    target_id = page_ids[-1]
-
-    page_result = mcp_client.call_tool("get_page_content_by_sections_tool", {"page_id": target_id})
-    if not page_result.get("success"):
-        return jsonify({"error": page_result.get("error", "Failed to fetch page content"), "detected": detected}), 502
-
-    page_content = page_result.get("data", "")
-
-    # If multiple pages, fetch their content as well
-    reference_content = ""
-    if len(page_ids) > 1:
-        for pid in page_ids[:-1]:
-            ref_result = mcp_client.call_tool("get_page_content_by_sections_tool", {"page_id": pid})
-            if ref_result.get("success"):
-                reference_content += f"\n--- Reference Page {pid} ---\n{format_result(ref_result.get('data', ''))}\n--- End ---\n"
-
-    # Compose prompt for Copilot
     prompt = (
-        f"USER PROMPT: {user_msg}\n\n"
-        f"{reference_content}"
-        f"--- Target Confluence Page Content ({target_id}) ---\n{format_result(page_content)}\n--- End ---\n\n"
-        "Respond to the user prompt using the page content above."
+        AVAILABLE_TOOLS + "\n\n"
+        + link_context
+        + history_context
+        + f"User: {user_msg}\n\n"
+        + "If this requires a tool, respond with TOOL_CALL and ARGS. Otherwise respond normally."
     )
 
     response, err = send_to_copilot(prompt)
     if err:
         return jsonify({"error": err, "detected": detected}), 502
 
-    return jsonify({"response": response, "detected": detected, "page_content": page_content})
+    # Check if Copilot wants to call a tool
+    tool_result = _parse_and_execute_tool_call(response)
+    if tool_result is not None:
+        return jsonify({"response": tool_result, "detected": detected})
 
-# -- PR Handler ----------------------------------------------------------
+    # No tool call — return Copilot's direct response
+    return jsonify({"response": response, "detected": detected if detected else None})
 
-def handle_pr(user_msg: str, prs: list[dict]):
-    target = prs[0]
-    label = f'{target["owner"]}/{target["repo"]}#{target["pr_number"]}'
-    detected = [f"pr:{label}"]
 
-    # Use MCP review tool -- it reviews AND posts comments automatically
-    print(f"[DEBUG] Starting PR review for {label}", flush=True)
-    result = mcp_client.call_tool("review_pull_request_tool", {
-        "repo": target["repo"],
-        "pr_number": target["pr_number"],
-        "checklist": [],
-    })
-    print(f"[DEBUG] PR review result: {str(result)[:200]}", flush=True)
+def _format_confluence_review(page_id: str, data: dict) -> str:
+    """Format review results into a user-friendly summary."""
+    issues_found = data.get("issues_found", 0)
+    severity = data.get("severity_breakdown", {})
+    errors = severity.get("errors", 0)
+    warnings = severity.get("warnings", 0)
+    info = severity.get("info", 0)
+    readability = data.get("readability") or {}
+    flesch = readability.get("flesch_ease", "N/A")
+    grade = readability.get("fk_grade", "N/A")
+    comments_posted = data.get("comments_posted", 0)
+    footer_posted = data.get("footer_posted", False)
+    executed = data.get("executed_checks", [])
+    skipped = data.get("skipped_checks", [])
+    doc_type = data.get("document_type", "unknown")
 
-    if not result.get("success"):
-        return jsonify({"error": result.get("error", "PR review failed"), "detected": detected}), 502
+    lines = []
+    lines.append(f"Review completed for Confluence page {page_id}.")
+    lines.append("")
+    lines.append(f"Document Type: {doc_type.title()}")
+    lines.append("")
+    lines.append(f"Issues Found: {issues_found}")
+    lines.append(f"  - Errors: {errors}")
+    lines.append(f"  - Warnings: {warnings}")
+    lines.append(f"  - Info: {info}")
+    lines.append("")
+    lines.append(f"Readability: Flesch Ease {flesch}, Grade Level {grade}")
+    lines.append("")
+    lines.append(f"Comments Posted: {comments_posted} inline")
+    footer_status = "Posted" if footer_posted else "Not posted (may retry on next run)"
+    lines.append(f"Footer Summary: {footer_status}")
+    lines.append("")
+    checks_str = ", ".join(executed) if executed else "None"
+    lines.append(f"Checks Executed: {checks_str}")
+    if skipped:
+        skipped_parts = []
+        for s in skipped:
+            if isinstance(s, dict):
+                skipped_parts.append(f"{s.get('id', '?')} ({s.get('reason', '?')})")
+        if skipped_parts:
+            lines.append(f"Checks Skipped: {', '.join(skipped_parts)}")
 
-    review_data = result.get("data", {})
-    summary = f"Review completed for {label}.\n\n{format_result(review_data)}"
+    issues = data.get("issues", [])
+    if issues:
+        lines.append("")
+        lines.append("Top Issues:")
+        for issue in issues[:5]:
+            sev = issue.get("severity", "info").upper()
+            msg = issue.get("message", "")
+            lines.append(f"  [{sev}] {msg}")
+        if len(issues) > 5:
+            lines.append(f"  ... and {len(issues) - 5} more issues (see inline comments on page)")
 
-    return jsonify({"response": summary, "detected": detected, "mcp_review": review_data})
+    return "\n".join(lines)
+
+
+def _parse_and_execute_tool_call(response: str) -> str | None:
+    """Parse Copilot's response for a TOOL_CALL and execute it if found."""
+    if "TOOL_CALL:" not in response:
+        return None
+
+    try:
+        # Extract tool name
+        tool_match = re.search(r"TOOL_CALL:\s*(.+?)\s*(?:\n|$)", response)
+        if not tool_match:
+            return None
+        tool_name = tool_match.group(1).strip()
+
+        # Extract args
+        args_match = re.search(r"ARGS:\s*({.+?})\s*(?:\n|$)", response, re.DOTALL)
+        if not args_match:
+            args = {}
+        else:
+            args = json.loads(args_match.group(1))
+
+        print(f"[TOOL_CALL] Tool: {tool_name}, Args: {args}", flush=True)
+
+        # Execute the tool
+        result = mcp_client.call_tool(tool_name, args)
+        print(f"[TOOL_CALL] Result: {str(result)[:300]}", flush=True)
+
+        if not result.get("success"):
+            error_msg = result.get("error", "Unknown error")
+            print(f"[TOOL_CALL] Failed: {error_msg}", flush=True)
+            return "Sorry, something went wrong while processing your request. Please try again."
+
+        data = result.get("data", {})
+
+        # Format based on tool type
+        if tool_name == "review_confluence_page_content":
+            return _format_confluence_review(args.get("page_id", ""), data)
+        elif tool_name == "review_pull_request_tool":
+            pr_summary = format_result(data)
+            followup = f"Here are the PR review results:\n\n{pr_summary}\n\nSummarize these results in a clear, human-friendly way. List key findings, issues, and suggestions. Do NOT output raw JSON."
+            followup_response, followup_err = send_to_copilot(followup)
+            if followup_err:
+                return "PR review completed but I couldn't generate a summary. Please check the PR page for inline comments."
+            return followup_response
+        elif tool_name in ("get_page_content_by_sections_tool", "get_confluence_page_content"):
+            # Send fetched content back to Copilot for summarization/answering
+            page_text = format_result(data)
+            followup = f"Here is the Confluence page content:\n\n{page_text}\n\nNow answer the user\'s original request about this content."
+            followup_response, followup_err = send_to_copilot(followup)
+            if followup_err:
+                return "I fetched the page content but couldn't process it. Please try again."
+            return followup_response
+        else:
+            raw = format_result(data)
+            followup = f"Here is the tool result:\n\n{raw}\n\nPresent this information to the user in a clear, readable way. Do NOT output raw JSON or code blocks."
+            followup_response, followup_err = send_to_copilot(followup)
+            if followup_err:
+                return "The action was completed successfully."
+            return followup_response
+
+    except Exception as e:
+        print(f"[TOOL_CALL] Error: {e}", flush=True)
+        return "Sorry, something went wrong while processing your request. Please try again."
 
 
 atexit.register(lambda: mcp_client.shutdown())

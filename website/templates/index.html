@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Copilot Bridge</title>
+    <title>MunnAI</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
     <div class="header">
-        <h1>munnAI</h1><br>
+        <h1>MunnAI</h1><br>
         <span class="subtitle">AI-Powered Confluence & GitHub Pull Request Review Assistant</span>
     </div>
     <div class="chat-area" id="chat-scroll">
@@ -25,6 +25,7 @@ const chat = document.getElementById("chat");
 const chatScroll = document.getElementById("chat-scroll");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
+const conversationHistory = [];
 
 function esc(text) {
     const d = document.createElement("div");
@@ -46,11 +47,25 @@ function addMsg(role, text, badges, isStatus) {
     div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
         <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
         ${badgeHtml}
-        <div${isStatus ? ' style="display:flex;align-items:center;font-size:16px;"' : ''}>${esc(text)}</div>
+        <div${isStatus ? ' style="display:flex;align-items:center;font-size:16px;"' : ''} style="white-space:pre-wrap;word-wrap:break-word;">${role === 'user' ? esc(text) : formatBotText(text)}</div>
     </div>`;
     chat.appendChild(div);
     chatScroll.scrollTop = chatScroll.scrollHeight;
     return div;
+}
+
+function formatBotText(text) {
+    // Escape HTML first
+    let safe = esc(text);
+    // Bold: **text**
+    safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // Headers: ### text
+    safe = safe.replace(/^### (.+)$/gm, '<strong style="font-size:15px;">$1</strong>');
+    safe = safe.replace(/^## (.+)$/gm, '<strong style="font-size:16px;">$1</strong>');
+    // Bullet points
+    safe = safe.replace(/^  - /gm, '  • ');
+    safe = safe.replace(/^- /gm, '• ');
+    return safe;
 }
 
 function addLoading() {
@@ -68,6 +83,7 @@ async function send() {
     input.value = "";
     input.style.height = "44px";
     addMsg("user", text);
+    conversationHistory.push({ role: "user", text: text });
     sendBtn.disabled = true;
     const loader = addLoading();
 
@@ -75,7 +91,7 @@ async function send() {
         const res = await fetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: text }),
+            body: JSON.stringify({ prompt: text, history: conversationHistory }),
         });
         const data = await res.json();
         loader.remove();
@@ -92,6 +108,7 @@ async function send() {
         } else if (data.response) {
             const isRefusal = /can't assist|cannot assist|unable to help|i'm sorry|i am sorry/i.test(data.response);
             addMsg("bot", data.response, data.detected);
+            conversationHistory.push({ role: "bot", text: data.response });
             if (data.detected && data.detected.length && !isRefusal) {
                 addMsg("bot", "✅ Task completed successfully", null, true);
             }
@@ -149,7 +166,7 @@ function typeMsg(role, text, badges, isStatus, delay=30) {
     return div;
 }
 
-typeMsg("bot", "Hi! I am munnAI, how may I help you today?");
+typeMsg("bot", "Hi! I am MunnAI, how may I help you today?");
 
 </script>
 </body>
