@@ -19,14 +19,28 @@ async function handlePrompt(promptText) {
     }
 
     const model = models[0];
-    const messages = [vscode.LanguageModelChatMessage.User(promptText)];
-    const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
+
+    const systemInstruction =
+        "You are MUNN AI, an AI-powered Confluence and GitHub Pull Request Review Assistant. " +
+        "Rules: Never refuse outright. If something cannot be fully completed, provide the closest helpful alternative. " +
+        "Be concise but actionable. Prefer structured outputs when possible.\n\n";
+
+    const messages = [
+        vscode.LanguageModelChatMessage.User(systemInstruction + promptText)
+    ];
+
+    const response = await model.sendRequest(
+        messages,
+        {},
+        new vscode.CancellationTokenSource().token
+    );
 
     let result = "";
     for await (const chunk of response.text) {
         result += chunk;
     }
-    return result;
+
+    return result.trim();
 }
 
 function startServer(context) {
