@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copilot Bridge</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="header">
+        <h1>munnAI</h1><br>
+        <span class="subtitle">AI-Powered Confluence & GitHub Pull Request Review Assistant</span>
+    </div>
+    <div class="chat-area" id="chat-scroll">
+        <div class="chat-inner" id="chat"></div>
+    </div>
+    <div class="input-bar">
+        <div class="input-wrap">
+            <textarea id="input" placeholder="Paste a link or type a prompt... (Ctrl+Enter to send)" rows="1"></textarea>
+            <button class="send-btn" id="send">Send</button>
+        </div>
+    </div>
+<script>
+const chat = document.getElementById("chat");
+const chatScroll = document.getElementById("chat-scroll");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+
+function esc(text) {
+    const d = document.createElement("div");
+    d.textContent = text;
+    return d.innerHTML;
+}
+function addMsg(role, text, badges, isStatus) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    let badgeHtml = "";
+    if (badges && badges.length) {
+        badgeHtml = '<div style="margin-bottom:6px">' +
+            badges.map(b => `<span class="detected-badge">${esc(b)}</span>`).join("") +
+            "</div>";
+    }
+    // Add time
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
+        <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
+        ${badgeHtml}
+        <div${isStatus ? ' style="display:flex;align-items:center;font-size:16px;"' : ''}>${esc(text)}</div>
+    </div>`;
+    chat.appendChild(div);
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+    return div;
+}
+
+function addLoading() {
+    const div = document.createElement("div");
+    div.className = "msg bot";
+    div.id = "loader";
+    div.innerHTML = `<div class="msg-inner loading">Thinking</div>`;
+    chat.appendChild(div);
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+    return div;
+}
+async function send() {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    input.style.height = "44px";
+    addMsg("user", text);
+    sendBtn.disabled = true;
+    const loader = addLoading();
+
+    try {
+        const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: text }),
+        });
+        const data = await res.json();
+        loader.remove();
+
+        // Show update message if detected (review task)
+        if (data.detected && data.detected.length) {
+            addMsg("bot", "Review completed for: " + data.detected.join(", "));
+        }
+
+        // Show error or response
+        if (data.error) {
+            if (data.detected && data.detected.length) {
+                addMsg("bot", "❌ " + data.error, null, true);
+            } else {
+                addMsg("bot", "❌ " + data.error);
+            }
+        } else if (data.response) {
+            addMsg("bot", data.response, data.detected);
+            if (data.detected && data.detected.length) {
+                addMsg("bot", "✅ Task completed successfully", null, true);
+            }
+        } else {
+            addMsg("bot", "No response");
+        }
+    } catch (e) {
+        loader.remove();
+        addMsg("bot", "❌ Error: " + e.message, null, true);
+    }
+    sendBtn.disabled = false;
+    input.focus();
+}
+
+sendBtn.addEventListener("click", send);
+input.addEventListener("keydown", e => {
+    if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); send(); }
+});
+input.addEventListener("input", () => {
+    input.style.height = "44px";
+    input.style.height = Math.min(input.scrollHeight, 150) + "px";
+});
+
+function typeMsg(role, text, badges, isStatus, delay=30) {
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    let badgeHtml = "";
+    if (badges && badges.length) {
+        badgeHtml = '<div style="margin-bottom:6px">' +
+            badges.map(b => `<span class="detected-badge">${esc(b)}</span>`).join("") +
+            "</div>";
+    }
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
+        <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
+        ${badgeHtml}
+        <div id="typewriter"></div>
+    </div>`;
+    chat.appendChild(div);
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+
+    // Typewriter effect
+    const target = div.querySelector("#typewriter");
+    let i = 0;
+    function type() {
+        if (i <= text.length) {
+            target.innerHTML = esc(text.slice(0, i));
+            chatScroll.scrollTop = chatScroll.scrollHeight;
+            i++;
+            setTimeout(type, delay);
+        }
+    }
+    type();
+    return div;
+}
+
+typeMsg("bot", "Hi! I am munnAI, how may I help you today?");
+
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "name": "copilot-bridge",
+  "displayName": "Copilot Bridge",
+  "description": "Local REST API bridge to GitHub Copilot",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilotBridge.start",
+        "title": "Copilot Bridge: Start Server"
+      },
+      {
+        "command": "copilotBridge.stop",
+        "title": "Copilot Bridge: Stop Server"
+      }
+    ]
+  },
+  "extensionDependencies": [
+    "github.copilot-chat"
+  ]
+}

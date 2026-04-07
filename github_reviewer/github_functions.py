@@ -19,6 +19,7 @@ It provides methods to:
 # Used to perform HTTP requests to GitHub's REST API
 
 import difflib
+import re
 import requests
 # Holds configuration values like BASE_URL, OWNER, GITHUB_TOKEN
 import config
@@ -399,36 +400,19 @@ class GitHubAPI:
     # Fetch review instructions from repo                                #
     # ------------------------------------------------------------------ #
 
-    # Common file names for review instruction documents
-    _INSTRUCTION_FILE_CANDIDATES = [
-        "INSTRUCTIONS.md",
-        "instructions.md",
-        "REVIEW_INSTRUCTIONS.md",
-        "review_instructions.md",
-        "REVIEW.md",
-        "review.md",
-        "PR_REVIEW.md",
-        "pr_review.md",
-        "CHECKLIST.md",
-        "checklist.md",
-        ".github/INSTRUCTIONS.md",
-        ".github/instructions.md",
-        ".github/REVIEW_INSTRUCTIONS.md",
-        ".github/review_instructions.md",
-        ".github/PR_REVIEW.md",
-        ".github/CHECKLIST.md",
-        "docs/INSTRUCTIONS.md",
-        "docs/instructions.md",
-        "docs/REVIEW_INSTRUCTIONS.md",
-        "docs/review_instructions.md",
-    ]
+    # Pattern to match instruction/checklist filenames (case-insensitive)
+    _INSTRUCTION_FILENAME_PATTERN = re.compile(
+        r"^(instructions|review_instructions|review|pr_review|checklist)"
+        r"\.md$",
+        re.IGNORECASE,
+    )
 
     def fetch_review_instructions(self, repo: str, ref: str = "main") -> dict:
         """
         Search the repository for a review instruction/checklist markdown file.
 
-        Scans a list of common file paths for instruction documents.
-        Returns the first one found, decoded as UTF-8 text.
+        Fetches the repo file tree in a single API call, then matches filenames
+        against a pattern. Searches root, .github/, and docs/ directories.
 
         :param repo: Repository name.
         :param ref:  Git ref to search (branch, tag, or SHA). Defaults to "main".
@@ -438,25 +422,48 @@ class GitHubAPI:
                  - "content": str (file content, or "")
                  - "ref": str (the ref used)
         """
-        for candidate in self._INSTRUCTION_FILE_CANDIDATES:
-            content = self.get_file_content_at_ref(repo, candidate, ref)
-            if content:
-                print(f"Found review instructions: {candidate} (ref: {ref})")
-                return {
-                    "found": True,
-                    "file_path": candidate,
-                    "content": content,
-                    "ref": ref,
-                }
+        import re as _re
 
-        # Also try the PR's head branch if ref was explicit
+        # Fetch the full file tree in one API call
+        tree_url = (
+            f"{self._base_url}/repos/{self._owner}/{repo}"
+            f"/git/trees/{ref}?recursive=1"
+        )
+        resp = requests.get(tree_url, headers=self._headers)
+        if resp.status_code != 200:
+            print(f"Could not fetch repo tree: {resp.status_code}")
+            return {"found": False, "file_path": "", "content": "", "ref": ref}
+
+        tree = resp.json().get("tree", [])
+
+        # Directories we care about (empty string = repo root)
+        search_dirs = ("", ".github/", "docs/")
+
+        for item in tree:
+            if item.get("type") != "blob":
+                continue
+            path = item["path"]
+            # Check if file is in one of our target directories
+            for prefix in search_dirs:
+                if not path.startswith(prefix):
+                    continue
+                filename = path[len(prefix):]
+                # Skip files in subdirectories deeper than our target
+                if "/" in filename:
+                    continue
+                if self._INSTRUCTION_FILENAME_PATTERN.match(filename):
+                    content = self.get_file_content_at_ref(repo, path, ref)
+                    if content:
+                        print(f"Found review instructions: {path} (ref: {ref})")
+                        return {
+                            "found": True,
+                            "file_path": path,
+                            "content": content,
+                            "ref": ref,
+                        }
+
         print(f"No review instruction file found in {repo} at ref '{ref}'.")
-        return {
-            "found": False,
-            "file_path": "",
-            "content": "",
-            "ref": ref,
-        }
+        return {"found": False, "file_path": "", "content": "", "ref": ref}
 
     def review_pull_request(self, repo: str, pr_number: int, checklist: list):
         """
