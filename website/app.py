@@ -280,11 +280,92 @@ def chat():
 
 # -- Confluence Handler --------------------------------------------------
 
+def _is_review_request(user_msg: str) -> bool:
+    """Check if the user is asking to apply instructions/review one page using another."""
+    review_keywords = [
+        r"apply.*(?:instructions|checklist|rules|guidelines)",
+        r"review.*page",
+        r"use.*instructions.*(?:on|to|for)",
+        r"follow.*instructions.*(?:on|to|for)",
+        r"check.*page.*(?:using|with|from)",
+    ]
+    msg_lower = user_msg.lower()
+    return any(re.search(p, msg_lower) for p in review_keywords)
+
+
+def _identify_roles(user_msg: str, conf_urls: list[str], page_ids: list[str]) -> tuple[str | None, str | None]:
+    """Identify which page is the checklist and which is the target based on surrounding text.
+    Returns (checklist_id, target_id). Either may be None if not identified."""
+    msg_lower = user_msg.lower()
+
+    checklist_patterns = [
+        r"(?:use|follow|from|using)\s+(?:the\s+)?(?:instructions|checklist|rules|guidelines)\s+(?:from|on|in)\s+",
+        r"(?:instructions|checklist|rules|guidelines)\s+(?:from|on|in)\s+",
+    ]
+    target_patterns = [
+        r"(?:apply|review|check|use)\s+(?:it\s+)?(?:on|to|for)\s+(?:this\s+)?(?:page)?\s*",
+        r"(?:on|to|for)\s+(?:this\s+)?page\s*",
+    ]
+
+    checklist_id = None
+    target_id = None
+
+    # For each URL, check if its surrounding text matches checklist or target patterns
+    for i, url in enumerate(conf_urls):
+        url_pos = msg_lower.find(url.lower())
+        if url_pos < 0:
+            continue
+        # Get text before this URL (up to 100 chars)
+        before_text = msg_lower[max(0, url_pos - 100):url_pos]
+
+        for pattern in checklist_patterns:
+            if re.search(pattern, before_text):
+                checklist_id = page_ids[i]
+                break
+        for pattern in target_patterns:
+            if re.search(pattern, before_text):
+                target_id = page_ids[i]
+                break
+
+    # If we identified one but not the other, assign the remaining page
+    if len(page_ids) == 2:
+        if checklist_id and not target_id:
+            target_id = [pid for pid in page_ids if pid != checklist_id][0]
+        elif target_id and not checklist_id:
+            checklist_id = [pid for pid in page_ids if pid != target_id][0]
+
+    return checklist_id, target_id
+
+
 def handle_confluence(user_msg: str, page_ids: list[str]):
     detected = [f"confluence:{pid}" for pid in page_ids]
+
+    # Re-extract URLs in order to match them to page_ids positionally
+    conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
+
+    # If multiple pages and user wants to apply instructions/review,
+    # use MCP review tool to post comments directly on the Confluence page
+    if len(page_ids) >= 2 and _is_review_request(user_msg):
+        checklist_id, target_id = _identify_roles(user_msg, conf_urls, page_ids)
+
+        if checklist_id and target_id:
+            print(f"[DEBUG] Confluence review: checklist={checklist_id}, target={target_id}", flush=True)
+            result = mcp_client.call_tool("review_confluence_page_content", {
+                "page_id": target_id,
+                "checklist_page_id": checklist_id,
+            })
+            print(f"[DEBUG] Confluence review result: {str(result)[:300]}", flush=True)
+
+            if not result.get("success"):
+                return jsonify({"error": result.get("error", "Confluence review failed"), "detected": detected}), 502
+
+            review_data = result.get("data", {})
+            summary = f"Review completed and comments posted to Confluence page {target_id}.\n\n{format_result(review_data)}"
+            return jsonify({"response": summary, "detected": detected})
+
+    # Otherwise, fetch content and send to Copilot for a general response
     target_id = page_ids[-1]
 
-    # Fetch the main page content
     page_result = mcp_client.call_tool("get_page_content_by_sections_tool", {"page_id": target_id})
     if not page_result.get("success"):
         return jsonify({"error": page_result.get("error", "Failed to fetch page content"), "detected": detected}), 502

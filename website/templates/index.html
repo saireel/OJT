@@ -80,10 +80,7 @@ async function send() {
         const data = await res.json();
         loader.remove();
 
-        // Show update message if detected (review task)
-        if (data.detected && data.detected.length) {
-            addMsg("bot", "Review completed for: " + data.detected.join(", "));
-        }
+        // Show detected links (informational only)
 
         // Show error or response
         if (data.error) {
@@ -93,8 +90,9 @@ async function send() {
                 addMsg("bot", "❌ " + data.error);
             }
         } else if (data.response) {
+            const isRefusal = /can't assist|cannot assist|unable to help|i'm sorry|i am sorry/i.test(data.response);
             addMsg("bot", data.response, data.detected);
-            if (data.detected && data.detected.length) {
+            if (data.detected && data.detected.length && !isRefusal) {
                 addMsg("bot", "✅ Task completed successfully", null, true);
             }
         } else {
