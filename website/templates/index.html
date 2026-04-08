@@ -7,17 +7,39 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-    <div class="header">
-        <h1>MunnAI</h1><br>
-        <span class="subtitle">AI-Powered Confluence & GitHub Pull Request Review Assistant</span>
+    <div class="sidebar">
+        <div class="sidebar-brand">
+            <h1>MunnAI</h1>
+            <div class="subtitle">AI-Powered Confluence &amp; GitHub Review Assistant</div>
+        </div>
+        <div class="sidebar-section">
+            <h3>Capabilities</h3>
+            <div class="sidebar-item"><span class="dot"></span> Confluence Page Review</div>
+            <div class="sidebar-item"><span class="dot"></span> GitHub PR Review</div>
+            <div class="sidebar-item"><span class="dot"></span> Inline &amp; Footer Comments</div>
+            <div class="sidebar-item"><span class="dot"></span> Page Summarization</div>
+            <div class="sidebar-item"><span class="dot"></span> Content Updates</div>
+        </div>
+        <div class="sidebar-section">
+            <h3>Quick Tips</h3>
+            <div class="sidebar-item" style="flex-direction:column;align-items:flex-start;gap:4px;font-size:0.8rem;color:#777;">
+                <span>Paste a Confluence or GitHub link to get started</span>
+                <span>Use Ctrl+Enter to send</span>
+            </div>
+        </div>
+        <div class="sidebar-footer">
+            MunnAI v1.0
+        </div>
     </div>
-    <div class="chat-area" id="chat-scroll">
-        <div class="chat-inner" id="chat"></div>
-    </div>
-    <div class="input-bar">
-        <div class="input-wrap">
-            <textarea id="input" placeholder="Paste a link or type a prompt... (Ctrl+Enter to send)" rows="1"></textarea>
-            <button class="send-btn" id="send">Send</button>
+    <div class="main">
+        <div class="chat-area" id="chat-scroll">
+            <div class="chat-inner" id="chat"></div>
+        </div>
+        <div class="input-bar">
+            <div class="input-wrap">
+                <textarea id="input" placeholder="Paste a link or type a prompt... (Ctrl+Enter to send)" rows="1"></textarea>
+                <button class="send-btn" id="send">Send</button>
+            </div>
         </div>
     </div>
 <script>

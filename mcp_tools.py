@@ -172,14 +172,15 @@ Args:
  - page_id (str): The ID of the page to comment on.
  - comment (str): The text of the comment.
  - text_selection (str): The exact text to attach the comment to.
+ - match_index (int, optional): 0-based occurrence index to target when text appears multiple times.
 
 Returns:
  - dict: {"success": True, "data": {...}} if comment is posted
          {"success": False, "error": "error message"} if posting fails
 """
 )
-def post_confluence_inline_comment(page_id: str, comment: str, text_selection: str):
-    return post_inline_comment(page_id, comment, text_selection)
+def post_confluence_inline_comment(page_id: str, comment: str, text_selection: str, match_index: int | None = None):
+    return post_inline_comment(page_id, comment, text_selection, match_index=match_index)
 
 @mcp.tool(description="""
 Lists all repositories accessible to the authenticated user.

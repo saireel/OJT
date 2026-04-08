@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 import atexit
+import time
 
 from flask import Flask, render_template, request, jsonify
 import requests
@@ -15,6 +16,8 @@ MCP_SERVER_SCRIPT = os.path.join(MCP_SERVER_DIR, "mcp_tools.py")
 app = Flask(__name__)
 
 COPILOT_BRIDGE_URL = "http://127.0.0.1:5100/api/prompt"
+
+MAX_AGENT_STEPS = 20  # Raised — acts as safety net, not a kill switch
 
 
 # -- MCP Client (stdio JSON-RPC) ----------------------------------------
@@ -40,7 +43,7 @@ class MCPClient:
                 [sys.executable, MCP_SERVER_SCRIPT],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=None,  # Inherit stderr so MCP/review logs appear in Flask terminal
+                stderr=None,
                 cwd=MCP_SERVER_DIR,
                 env=env,
             )
@@ -87,7 +90,6 @@ class MCPClient:
         msg_id = msg.get("id")
         print(f"[MCP] Sent: {msg.get('method', '?')} (id={msg_id})", flush=True)
 
-        import time
         from queue import Queue, Empty
 
         result_queue: Queue = Queue()
@@ -110,9 +112,8 @@ class MCPClient:
                         parsed = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    # Skip notifications (no "id" field) — we only want our response
                     if "id" not in parsed:
-                        print(f"[MCP] notification: {parsed.get('method', '?')}", flush=True)
+                        print(f"[MCP] notification: {parsed.get('method', '?')}",  flush=True)
                         continue
                     result_queue.put(parsed)
                     return
@@ -189,9 +190,10 @@ class MCPClient:
 mcp_client = MCPClient()
 
 
-# -- Copilot Bridge ------------------------------------------------------
+# -- Copilot Bridge (LLM) ------------------------------------------------
 
-def send_to_copilot(prompt: str) -> tuple[str, str | None]:
+def call_llm(prompt: str) -> tuple[str, str | None]:
+    """Send a prompt to the LLM (Copilot) and return (response, error)."""
     try:
         resp = requests.post(COPILOT_BRIDGE_URL, json={"prompt": prompt}, timeout=180)
         data = resp.json()
@@ -233,61 +235,502 @@ def index():
     return render_template("index.html")
 
 
+# -- Agent System Prompt -------------------------------------------------
 
+AGENT_SYSTEM_PROMPT = """You are an autonomous AI agent called MunnAI.
 
-# -- Tool Descriptions for Copilot ------------------------------------
+YOUR CORE RULES:
+1. Always read and consider the user's ENTIRE prompt and conversation history first.
+2. Think step by step before acting.
+3. When given an instructions page and a target page, ALWAYS fetch the instructions page first to read what it says before doing anything to the target page. Never assume what it says.
+4. After EVERY tool call, you MUST explicitly verify: "Have I completed ALL required actions? What is left undone?"
+5. If a task requires applying an action to MULTIPLE items (e.g. every occurrence of a word, every section, every row), you MUST continue calling tools until ALL items are covered. Never stop after one.
+6. Track completed vs remaining work in every THOUGHT.
+7. Only produce FINAL_ANSWER when the ENTIRE task is fully complete — not partially.
+8. If the user's intent is ambiguous, ask a clarifying question using FINAL_ANSWER.
+9. Do NOT auto-review pages unless the instructions or user explicitly ask for it.
 
-AVAILABLE_TOOLS = """
-You have access to the following tools. When the user's request requires using a tool, respond with EXACTLY this format:
+RESPONSE FORMAT — you must ALWAYS use one of these two formats:
+
+Format 1 — when you need to use a tool:
+THOUGHT: <your reasoning, what you have done so far, what still needs to be done>
 TOOL_CALL: <tool_name>
 ARGS: <json_arguments>
+
+Format 2 — when the task is fully complete OR you need to ask for clarification:
+THOUGHT: <your reasoning confirming task is complete>
+FINAL_ANSWER: <your response to the user>
+
+VERIFICATION RULE (CRITICAL):
+After every tool call observation, ask yourself:
+- "Have I completed ALL required actions, not just some?"
+- "Are there more items/occurrences/steps I missed?"
+- If NO: keep using tools
+- If YES: only then write FINAL_ANSWER
 
 Available tools:
 
 1. review_confluence_page_content
-   - Reviews a Confluence page for grammar, structure, readability, etc. and posts inline comments + footer summary directly on the page.
+   - Reviews a Confluence page for grammar, structure, readability, etc. and posts inline comments + footer summary.
    - Args: {"page_id": "...", "checklist_page_id": "(optional) page ID with custom review instructions"}
-   - Use when: user wants to review a Confluence page, post comments, check quality, apply a checklist, etc.
+   - Use ONLY when the user explicitly asks to review a page OR when instructions say to review.
 
 2. get_page_content_by_sections_tool
    - Fetches the content of a Confluence page (read-only, does NOT post anything).
    - Args: {"page_id": "..."}
-   - Use when: user wants to read, summarize, or ask questions about a Confluence page.
+   - Use to READ a page before deciding what to do.
 
 3. post_confluence_footer_comment
-   - Posts a single footer comment on a Confluence page.
+   - Posts a footer comment on a Confluence page.
    - Args: {"page_id": "...", "comment": "..."}
-   - Use when: user wants to post a specific comment on a page footer.
 
 4. post_confluence_inline_comment
-   - Posts an inline comment on specific text within a Confluence page.
+   - Posts an inline comment on specific text in a Confluence page.
    - Args: {"page_id": "...", "comment": "...", "text_selection": "exact text to attach comment to"}
-   - Use when: user wants to comment on a specific part of a page.
+   - CRITICAL: This posts ONE comment per call. To comment on N occurrences, call this tool N times, once per occurrence with the exact text of each occurrence.
+   - NOTE: This only posts on ONE text selection per call. If you need to comment on multiple occurrences, you MUST call this tool once per occurrence.
 
 5. review_pull_request_tool
    - Reviews a GitHub pull request and posts review comments.
    - Args: {"repo": "repo_name", "pr_number": 123, "checklist": []}
-   - Use when: user wants to review a GitHub PR.
 
 6. get_confluence_page_content
    - Gets raw Confluence page content.
    - Args: {"page_id": "..."}
-   - Use when: user needs the full raw content of a page.
 
 7. update_confluence_page
    - Updates the content of a Confluence page.
    - Args: {"page_id": "...", "title": "...", "content": "...", "version": 1, "message": "..."}
-   - Use when: user wants to edit/update a Confluence page.
 
-IMPORTANT PATTERNS:
-- If the user provides TWO Confluence links and says to "follow instructions" or "apply instructions" from one to the other, use review_confluence_page_content with the instruction page as checklist_page_id and the other as page_id.
-- If the user provides ONE Confluence link and asks to review/check it, use review_confluence_page_content with just page_id.
-- If the user provides a link and asks to read/summarize/explain it, use get_page_content_by_sections_tool.
-- Always use a tool when the user provides a link. Do NOT ask for clarification if you can infer the intent.
-
-If the user's request does NOT require any tool (e.g. general questions, greetings), just respond normally without TOOL_CALL.
+WORKFLOW for "apply instructions from page A to page B":
+  Step 1: get_page_content_by_sections_tool on page A to READ instructions
+  Step 2: get_page_content_by_sections_tool on page B to READ target content
+  Step 3: Analyze both. Decide what exact actions are needed.
+  Step 4: Execute all required actions. If instructions say "comment on every occurrence of X", find ALL occurrences in the target page content and call post_confluence_inline_comment ONCE PER OCCURRENCE.
+  Step 5: Verify ALL actions are done. Only then write FINAL_ANSWER.
 """
 
+
+# -- Tool Registry --------------------------------------------------------
+
+TOOL_REGISTRY = {
+    "review_confluence_page_content": lambda args: mcp_client.call_tool("review_confluence_page_content", args),
+    "get_page_content_by_sections_tool": lambda args: mcp_client.call_tool("get_page_content_by_sections_tool", args),
+    "post_confluence_footer_comment": lambda args: mcp_client.call_tool("post_confluence_footer_comment", args),
+    "post_confluence_inline_comment": lambda args: mcp_client.call_tool("post_confluence_inline_comment", args),
+    "review_pull_request_tool": lambda args: mcp_client.call_tool("review_pull_request_tool", args),
+    "get_confluence_page_content": lambda args: mcp_client.call_tool("get_confluence_page_content", args),
+    "update_confluence_page": lambda args: mcp_client.call_tool("update_confluence_page", args),
+}
+
+
+
+
+def _extract_page_ids_from_link_context(link_context: str) -> list[str]:
+    ids = re.findall(r'page_id\s*=\s*"(\d+)"', link_context)
+    return ids
+
+
+def _get_latest_page_content_observation(scratchpad: list, page_id: str) -> str:
+    for entry in reversed(scratchpad):
+        if entry.get("tool") not in ("get_page_content_by_sections_tool", "get_confluence_page_content"):
+            continue
+        inp = entry.get("input") or {}
+        if str(inp.get("page_id", "")) != str(page_id):
+            continue
+        return str(entry.get("output", ""))
+    return ""
+
+
+def _infer_occurrence_term(instruction_text: str) -> str:
+    patterns = [
+        r"(?:word|term)\s*[\"']([^\"']+)[\"']",
+        r"occurrence(?:s)?\s+of\s+[\"']([^\"']+)[\"']",
+        r"every\s+occurrence\s+of\s+([A-Za-z0-9_-]+)",
+        r"each\s+occurrence\s+of\s+([A-Za-z0-9_-]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, instruction_text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _count_term_occurrences(text: str, term: str) -> int:
+    if not text or not term:
+        return 0
+    term_escaped = re.escape(term)
+    if re.match(r'^[A-Za-z0-9_]+$', term):
+        pat = rf'\b{term_escaped}\b'
+    else:
+        pat = term_escaped
+    return len(re.findall(pat, text, flags=re.IGNORECASE))
+
+
+def _count_successful_inline_comments_for_term(scratchpad: list, page_id: str, term: str) -> int:
+    count = 0
+    for entry in scratchpad:
+        if entry.get("tool") != "post_confluence_inline_comment":
+            continue
+        inp = entry.get("input") or {}
+        if str(inp.get("page_id", "")) != str(page_id):
+            continue
+        sel = str(inp.get("text_selection", "")).strip().lower()
+        if sel != term.strip().lower():
+            continue
+
+        raw_result = entry.get("raw_result")
+        if isinstance(raw_result, dict) and raw_result.get("success") is True:
+            out_text = str(entry.get("output", "")).lower()
+            if "already exists" in out_text or "duplicate" in out_text:
+                continue
+            count += 1
+    return count
+
+
+
+
+def _count_successful_inline_comments_for_selection(scratchpad: list, page_id: str, text_selection: str) -> int:
+    count = 0
+    for entry in scratchpad:
+        if entry.get("tool") != "post_confluence_inline_comment":
+            continue
+        inp = entry.get("input") or {}
+        if str(inp.get("page_id", "")) != str(page_id):
+            continue
+        sel = str(inp.get("text_selection", "")).strip().lower()
+        if sel != str(text_selection).strip().lower():
+            continue
+        raw_result = entry.get("raw_result")
+        if isinstance(raw_result, dict) and raw_result.get("success") is True:
+            count += 1
+    return count
+
+def _needs_occurrence_completion(user_msg: str, scratchpad: list, link_context: str) -> tuple[bool, str]:
+    page_ids = _extract_page_ids_from_link_context(link_context)
+    if len(page_ids) < 2:
+        return False, ""
+
+    instructions_page_id = page_ids[0]
+    target_page_id = page_ids[1]
+
+    instructions_text = _get_latest_page_content_observation(scratchpad, instructions_page_id)
+    if not instructions_text:
+        return False, ""
+
+    occurrence_signal = bool(re.search(r'each\s+occurrence|every\s+occurrence|all\s+occurrences', instructions_text, re.IGNORECASE))
+    if not occurrence_signal:
+        return False, ""
+
+    term = _infer_occurrence_term(instructions_text)
+    if not term:
+        return False, ""
+
+    target_text = _get_latest_page_content_observation(scratchpad, target_page_id)
+    if not target_text:
+        return False, ""
+
+    expected = _count_term_occurrences(target_text, term)
+    if expected <= 0:
+        return False, ""
+
+    completed = _count_successful_inline_comments_for_term(scratchpad, target_page_id, term)
+    if completed < expected:
+        remaining = expected - completed
+        msg = (
+            f"VERIFICATION BLOCK: Incomplete multi-occurrence task. "
+            f"Instructions require comments for every occurrence of '{term}'. "
+            f"Expected {expected} based on target content, but only {completed} successful inline comment calls were made. "
+            f"Continue with post_confluence_inline_comment for the remaining {remaining} occurrences before FINAL_ANSWER."
+        )
+        return True, msg
+
+    return False, ""
+
+def _build_deterministic_execution_summary(user_msg: str, scratchpad: list) -> str:
+    """Build a non-LLM summary based only on actual tool outputs."""
+    total_calls = 0
+    success_calls = 0
+    failed_calls = 0
+    inline_success = 0
+    inline_failed = 0
+    last_errors: list[str] = []
+
+    for entry in scratchpad:
+        tool = entry.get("tool")
+        if tool == "verifier":
+            continue
+        total_calls += 1
+
+        raw = entry.get("raw_result")
+        if isinstance(raw, dict) and raw.get("success") is True:
+            success_calls += 1
+            if tool == "post_confluence_inline_comment":
+                inline_success += 1
+        else:
+            failed_calls += 1
+            if tool == "post_confluence_inline_comment":
+                inline_failed += 1
+            if isinstance(raw, dict):
+                err = raw.get("error")
+                if err:
+                    last_errors.append(str(err))
+            out = str(entry.get("output", ""))
+            if "TOOL ERROR:" in out:
+                last_errors.append(out)
+
+    lines = []
+    lines.append("Execution summary (from actual tool results):")
+    lines.append(f"- Request: {user_msg}")
+    lines.append(f"- Tool calls attempted: {total_calls}")
+    lines.append(f"- Successful tool calls: {success_calls}")
+    lines.append(f"- Failed tool calls: {failed_calls}")
+    lines.append(f"- Inline comments successfully posted: {inline_success}")
+    lines.append(f"- Inline comment failures: {inline_failed}")
+
+    if inline_success == 0:
+        lines.append("- Status: No inline comments were posted successfully.")
+    else:
+        lines.append("- Status: Some inline comments were posted; verify page for full coverage.")
+
+    if last_errors:
+        lines.append("- Recent errors:")
+        for err in last_errors[-3:]:
+            lines.append(f"  * {err}")
+
+    lines.append("- Note: This summary is deterministic and does not rely on LLM-generated claims.")
+    return "\n".join(lines)
+
+
+def _is_grammar_only_request(user_msg: str) -> bool:
+    text = (user_msg or "").lower()
+    has_grammar = "grammar" in text
+    has_review = "review" in text or "check" in text
+    broad_terms = [
+        "readability", "structure", "duplicate", "citation", "table", "all checks", "full review",
+        "everything", "comprehensive", "long sentence", "long paragraph", "repeated word", "context noise"
+    ]
+    asks_broad = any(term in text for term in broad_terms)
+    return has_grammar and has_review and not asks_broad
+
+
+# -- Agent Loop (ReAct + Verify-Then-Continue) ----------------------------
+
+def _build_agent_prompt(
+    system_prompt: str,
+    link_context: str,
+    history_context: str,
+    user_msg: str,
+    scratchpad: list,
+    step: int,
+) -> str:
+    """Build the full prompt for the LLM at each agent step."""
+
+    scratchpad_text = ""
+    if scratchpad:
+        scratchpad_text = "\n\n--- AGENT SCRATCHPAD (tools called so far) ---\n"
+        for i, entry in enumerate(scratchpad):
+            scratchpad_text += f"\n[Step {i+1}] Tool: {entry['tool']}\n"
+            scratchpad_text += f"Input: {json.dumps(entry['input'], default=str)}\n"
+            output_str = str(entry["output"])
+            if len(output_str) > 4000:
+                output_str = output_str[:4000] + "\n... (truncated for brevity)"
+            scratchpad_text += f"Observation: {output_str}\n"
+        scratchpad_text += "--- END SCRATCHPAD ---\n"
+
+    verification_reminder = ""
+    if scratchpad:
+        verification_reminder = (
+            "\n\nVERIFICATION REQUIRED: Review your scratchpad above. "
+            "Have you completed ALL required actions? Are there any remaining occurrences, items, or steps? "
+            "If the task is NOT fully done, continue with more tool calls. "
+            "Only write FINAL_ANSWER when everything is complete."
+        )
+
+    return (
+        system_prompt + "\n\n"
+        + link_context
+        + history_context
+        + scratchpad_text
+        + f"\nUser request: {user_msg}\n"
+        + verification_reminder
+        + f"\n\n[Agent step {step + 1}] What do you do next?"
+    )
+
+
+def run_agent(user_msg: str, history: list, link_context: str) -> str:
+    """
+    ReAct + Verify-Then-Continue agent loop.
+    LLM -> Tool -> Observation -> Verify -> LLM -> ... -> FINAL_ANSWER
+    """
+    scratchpad: list = []
+
+    history_context = ""
+    if history:
+        recent = history[-20:]
+        parts = []
+        for entry in recent:
+            role = "User" if entry.get("role") == "user" else "Assistant"
+            parts.append(f"{role}: {entry.get('text', '')}")
+        history_context = "Conversation history:\n" + "\n".join(parts) + "\n\n"
+
+    for step in range(MAX_AGENT_STEPS):
+        print(f"[AGENT] Step {step + 1}/{MAX_AGENT_STEPS}", flush=True)
+
+        prompt = _build_agent_prompt(
+            AGENT_SYSTEM_PROMPT,
+            link_context,
+            history_context,
+            user_msg,
+            scratchpad,
+            step,
+        )
+
+        response, err = call_llm(prompt)
+        print(f"[AGENT] LLM response (step {step + 1}): {response[:600]}", flush=True)
+
+        if err:
+            return f"Sorry, I encountered an error: {err}"
+
+        if not response.strip():
+            return "Sorry, I received an empty response. Please try again."
+
+        # --- Check for FINAL_ANSWER ---
+        final_match = re.search(r"FINAL_ANSWER:\s*(.+)", response, re.DOTALL)
+        if final_match:
+            needs_more, verify_msg = _needs_occurrence_completion(user_msg, scratchpad, link_context)
+            if needs_more:
+                print("[AGENT] Completion gate blocked premature FINAL_ANSWER.", flush=True)
+                scratchpad.append({"tool": "verifier", "input": {}, "output": verify_msg, "raw_result": {"success": False}})
+                continue
+
+            final_answer = final_match.group(1).strip()
+            print(f"[AGENT] Final answer at step {step + 1}", flush=True)
+            return final_answer
+
+        # --- Check for TOOL_CALL ---
+        tool_match = re.search(r"TOOL_CALL:\s*(.+?)\s*(?:\n|$)", response)
+        if not tool_match:
+            # No TOOL_CALL and no FINAL_ANSWER — strip THOUGHT prefix and return
+            cleaned = re.sub(r"^THOUGHT:.*?\n", "", response, count=1, flags=re.DOTALL).strip()
+            return cleaned if cleaned else response.strip()
+
+        tool_name = tool_match.group(1).strip()
+
+        # --- Parse ARGS ---
+        args_match = re.search(r"ARGS:\s*(\{.+?\})\s*(?:\n|$)", response, re.DOTALL)
+        args: dict = {}
+        if args_match:
+            try:
+                args = json.loads(args_match.group(1))
+            except json.JSONDecodeError as e:
+                observation = f"ERROR: Could not parse ARGS as JSON: {e}. Raw: {args_match.group(1)}"
+                scratchpad.append({"tool": tool_name, "input": args_match.group(1), "output": observation})
+                continue
+
+        # --- Validate tool ---
+        if tool_name not in TOOL_REGISTRY:
+            observation = f"ERROR: Unknown tool '{tool_name}'. Available: {', '.join(TOOL_REGISTRY.keys())}"
+            scratchpad.append({"tool": tool_name, "input": args, "output": observation})
+            continue
+
+        if tool_name == "review_confluence_page_content" and _is_grammar_only_request(user_msg):
+            # Force grammar-only checklist unless user explicitly provided a checklist page.
+            if not args.get("checklist_page_id"):
+                args["checklist_page_id"] = "__GRAMMAR_ONLY__"
+
+        print(f"[AGENT] Calling tool: {tool_name} | args: {json.dumps(args, default=str)[:300]}", flush=True)
+
+        # --- Execute tool ---
+        if tool_name == "post_confluence_inline_comment" and args.get("page_id") and args.get("text_selection"):
+            # Prevent repeated comments on match_index=0 by auto-advancing match_index.
+            page_id = str(args.get("page_id"))
+            text_selection = str(args.get("text_selection"))
+            already_done = _count_successful_inline_comments_for_selection(scratchpad, page_id, text_selection)
+
+            first_args = dict(args)
+            if "match_index" not in first_args:
+                first_args["match_index"] = already_done
+
+            batch_limit = 30
+            batch_results = []
+
+            first_result = TOOL_REGISTRY[tool_name](first_args)
+            print(f"[AGENT] Tool result: {str(first_result)[:400]}", flush=True)
+            batch_results.append((first_args, first_result))
+
+            total_occurrences = None
+            if isinstance(first_result, dict) and first_result.get("success"):
+                data = first_result.get("data", {})
+                if isinstance(data, dict):
+                    total_occurrences = data.get("occurrences_found")
+
+            if isinstance(total_occurrences, int):
+                start_idx = int(first_args.get("match_index", 0))
+                end_exclusive = min(total_occurrences, start_idx + batch_limit)
+                for idx in range(start_idx + 1, end_exclusive):
+                    next_args = dict(args)
+                    next_args["match_index"] = idx
+                    next_result = TOOL_REGISTRY[tool_name](next_args)
+                    print(f"[AGENT] Tool result (idx={idx}): {str(next_result)[:220]}", flush=True)
+                    batch_results.append((next_args, next_result))
+
+            for call_args, call_result in batch_results:
+                if isinstance(call_result, dict):
+                    if call_result.get("success"):
+                        observation = format_result(call_result.get("data", {}))
+                    else:
+                        observation = f"TOOL ERROR: {call_result.get('error', 'Unknown error')}"
+                else:
+                    observation = format_result(call_result)
+
+                scratchpad.append({
+                    "tool": tool_name,
+                    "input": call_args,
+                    "output": observation,
+                    "raw_result": call_result,
+                })
+
+            if isinstance(total_occurrences, int):
+                done_now = _count_successful_inline_comments_for_selection(scratchpad, page_id, text_selection)
+                remaining = max(total_occurrences - done_now, 0)
+                scratchpad.append({
+                    "tool": "verifier",
+                    "input": {"page_id": page_id, "text_selection": text_selection},
+                    "output": f"Batch progress: total_occurrences={total_occurrences}, completed={done_now}, remaining={remaining}. Continue if remaining > 0.",
+                    "raw_result": {"success": True},
+                })
+
+            continue
+
+        result = TOOL_REGISTRY[tool_name](args)
+        print(f"[AGENT] Tool result: {str(result)[:400]}", flush=True)
+
+        # --- Format observation ---
+        if isinstance(result, dict):
+            if result.get("success"):
+                observation = format_result(result.get("data", {}))
+            else:
+                observation = f"TOOL ERROR: {result.get('error', 'Unknown error')}"
+        else:
+            observation = format_result(result)
+
+        scratchpad.append({
+            "tool": tool_name,
+            "input": args,
+            "output": observation,
+            "raw_result": result,
+        })
+    # --- MAX_STEPS reached: return deterministic execution report ---
+    print(f"[AGENT] Max steps ({MAX_AGENT_STEPS}) reached. Returning deterministic execution summary.", flush=True)
+
+    if scratchpad:
+        return _build_deterministic_execution_summary(user_msg, scratchpad)
+
+    return "No tool actions were executed before reaching the step limit."
+
+
+# -- Chat Route -----------------------------------------------------------
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -297,7 +740,7 @@ def chat():
     if not user_msg:
         return jsonify({"error": "Empty prompt"}), 400
 
-    # Extract any detected links for badge display
+    # Extract detected links for badge display
     conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
     page_ids: list[str] = []
     for url in conf_urls:
@@ -315,17 +758,7 @@ def chat():
     detected = [f"confluence:{pid}" for pid in page_ids]
     detected += [f"pr:{p['owner']}/{p['repo']}#{p['pr_number']}" for p in prs]
 
-    # Build prompt with tool descriptions and conversation history
-    history_context = ""
-    if history:
-        recent = history[-20:]
-        parts = []
-        for entry in recent:
-            role = "User" if entry.get("role") == "user" else "Assistant"
-            parts.append(f"{role}: {entry.get('text', '')}")
-        history_context = "Conversation history:\n" + "\n".join(parts) + "\n\n"
-
-    # Build context about detected links so Copilot knows the page IDs
+    # Build link context
     link_context = ""
     if page_ids:
         link_context += "Detected Confluence page IDs from the user's message:\n"
@@ -339,144 +772,14 @@ def chat():
             link_context += f"  PR: {owner}/{repo}#{pr_num}\n"
         link_context += "\n"
 
-    prompt = (
-        AVAILABLE_TOOLS + "\n\n"
-        + link_context
-        + history_context
-        + f"User: {user_msg}\n\n"
-        + "If this requires a tool, respond with TOOL_CALL and ARGS. Otherwise respond normally."
-    )
-
-    response, err = send_to_copilot(prompt)
-    if err:
-        return jsonify({"error": err, "detected": detected}), 502
-
-    # Check if Copilot wants to call a tool
-    tool_result = _parse_and_execute_tool_call(response)
-    if tool_result is not None:
-        return jsonify({"response": tool_result, "detected": detected})
-
-    # No tool call — return Copilot's direct response
-    return jsonify({"response": response, "detected": detected if detected else None})
-
-
-def _format_confluence_review(page_id: str, data: dict) -> str:
-    """Format review results into a user-friendly summary."""
-    issues_found = data.get("issues_found", 0)
-    severity = data.get("severity_breakdown", {})
-    errors = severity.get("errors", 0)
-    warnings = severity.get("warnings", 0)
-    info = severity.get("info", 0)
-    readability = data.get("readability") or {}
-    flesch = readability.get("flesch_ease", "N/A")
-    grade = readability.get("fk_grade", "N/A")
-    comments_posted = data.get("comments_posted", 0)
-    footer_posted = data.get("footer_posted", False)
-    executed = data.get("executed_checks", [])
-    skipped = data.get("skipped_checks", [])
-    doc_type = data.get("document_type", "unknown")
-
-    lines = []
-    lines.append(f"Review completed for Confluence page {page_id}.")
-    lines.append("")
-    lines.append(f"Document Type: {doc_type.title()}")
-    lines.append("")
-    lines.append(f"Issues Found: {issues_found}")
-    lines.append(f"  - Errors: {errors}")
-    lines.append(f"  - Warnings: {warnings}")
-    lines.append(f"  - Info: {info}")
-    lines.append("")
-    lines.append(f"Readability: Flesch Ease {flesch}, Grade Level {grade}")
-    lines.append("")
-    lines.append(f"Comments Posted: {comments_posted} inline")
-    footer_status = "Posted" if footer_posted else "Not posted (may retry on next run)"
-    lines.append(f"Footer Summary: {footer_status}")
-    lines.append("")
-    checks_str = ", ".join(executed) if executed else "None"
-    lines.append(f"Checks Executed: {checks_str}")
-    if skipped:
-        skipped_parts = []
-        for s in skipped:
-            if isinstance(s, dict):
-                skipped_parts.append(f"{s.get('id', '?')} ({s.get('reason', '?')})")
-        if skipped_parts:
-            lines.append(f"Checks Skipped: {', '.join(skipped_parts)}")
-
-    issues = data.get("issues", [])
-    if issues:
-        lines.append("")
-        lines.append("Top Issues:")
-        for issue in issues[:5]:
-            sev = issue.get("severity", "info").upper()
-            msg = issue.get("message", "")
-            lines.append(f"  [{sev}] {msg}")
-        if len(issues) > 5:
-            lines.append(f"  ... and {len(issues) - 5} more issues (see inline comments on page)")
-
-    return "\n".join(lines)
-
-
-def _parse_and_execute_tool_call(response: str) -> str | None:
-    """Parse Copilot's response for a TOOL_CALL and execute it if found."""
-    if "TOOL_CALL:" not in response:
-        return None
-
+    # Run the agent loop
     try:
-        # Extract tool name
-        tool_match = re.search(r"TOOL_CALL:\s*(.+?)\s*(?:\n|$)", response)
-        if not tool_match:
-            return None
-        tool_name = tool_match.group(1).strip()
-
-        # Extract args
-        args_match = re.search(r"ARGS:\s*({.+?})\s*(?:\n|$)", response, re.DOTALL)
-        if not args_match:
-            args = {}
-        else:
-            args = json.loads(args_match.group(1))
-
-        print(f"[TOOL_CALL] Tool: {tool_name}, Args: {args}", flush=True)
-
-        # Execute the tool
-        result = mcp_client.call_tool(tool_name, args)
-        print(f"[TOOL_CALL] Result: {str(result)[:300]}", flush=True)
-
-        if not result.get("success"):
-            error_msg = result.get("error", "Unknown error")
-            print(f"[TOOL_CALL] Failed: {error_msg}", flush=True)
-            return "Sorry, something went wrong while processing your request. Please try again."
-
-        data = result.get("data", {})
-
-        # Format based on tool type
-        if tool_name == "review_confluence_page_content":
-            return _format_confluence_review(args.get("page_id", ""), data)
-        elif tool_name == "review_pull_request_tool":
-            pr_summary = format_result(data)
-            followup = f"Here are the PR review results:\n\n{pr_summary}\n\nSummarize these results in a clear, human-friendly way. List key findings, issues, and suggestions. Do NOT output raw JSON."
-            followup_response, followup_err = send_to_copilot(followup)
-            if followup_err:
-                return "PR review completed but I couldn't generate a summary. Please check the PR page for inline comments."
-            return followup_response
-        elif tool_name in ("get_page_content_by_sections_tool", "get_confluence_page_content"):
-            # Send fetched content back to Copilot for summarization/answering
-            page_text = format_result(data)
-            followup = f"Here is the Confluence page content:\n\n{page_text}\n\nNow answer the user\'s original request about this content."
-            followup_response, followup_err = send_to_copilot(followup)
-            if followup_err:
-                return "I fetched the page content but couldn't process it. Please try again."
-            return followup_response
-        else:
-            raw = format_result(data)
-            followup = f"Here is the tool result:\n\n{raw}\n\nPresent this information to the user in a clear, readable way. Do NOT output raw JSON or code blocks."
-            followup_response, followup_err = send_to_copilot(followup)
-            if followup_err:
-                return "The action was completed successfully."
-            return followup_response
-
+        response = run_agent(user_msg, history, link_context)
     except Exception as e:
-        print(f"[TOOL_CALL] Error: {e}", flush=True)
-        return "Sorry, something went wrong while processing your request. Please try again."
+        print(f"[AGENT] Unhandled error: {e}", flush=True)
+        return jsonify({"error": "Something went wrong. Please try again.", "detected": detected}), 500
+
+    return jsonify({"response": response, "detected": detected if detected else None})
 
 
 atexit.register(lambda: mcp_client.shutdown())

@@ -125,8 +125,8 @@ def post_footer_comment(page_id: str, comment: str) -> Dict[str, Any]:
         return {"success": True, "data": response.json()}
     return {"success": False, "error": error or "Failed to post footer comment"}
 
-def post_inline_comment(page_id: str, comment: str, text_selection: str) -> Dict[str, Any]:
-    result, error = confluence_api.post_inline_comment(page_id, comment, text_selection)
+def post_inline_comment(page_id: str, comment: str, text_selection: str, match_index: int | None = None) -> Dict[str, Any]:
+    result, error = confluence_api.post_inline_comment(page_id, comment, text_selection, match_index=match_index)
     if result is not None:
         return {"success": True, "data": result}
     return {"success": False, "error": error or "Failed to post inline comment"}

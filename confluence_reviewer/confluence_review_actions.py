@@ -1052,6 +1052,9 @@ class ReviewActions:
             {"id": "table_validation",     "execution_order": 11, "enabled": True, "required_env": ""},
         ]
 
+        if isinstance(page_id, str) and page_id.strip().upper() in {"__GRAMMAR_ONLY__", "GRAMMAR_ONLY"}:
+            return [{"id": "grammar", "execution_order": 1, "enabled": True, "required_env": ""}]
+
         if not page_id:
             return _DEFAULT
 

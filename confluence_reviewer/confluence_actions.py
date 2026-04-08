@@ -186,6 +186,7 @@ class ConfluenceAPI:
         comment: str,
         text_selection: str,
         original_position: Optional[int] = None,
+        match_index: Optional[int] = None,
         page_text: Optional[str] = None,
     ) -> Tuple[Optional[dict], Optional[str]]:
         """Post an inline comment anchored to matching text on a page.
@@ -214,7 +215,13 @@ class ConfluenceAPI:
             return None, f"text_selection '{selection}' not found in page"
 
         match_count = len(matches)
-        if isinstance(original_position, int) and original_position >= 0:
+        if isinstance(match_index, int):
+            if match_index < 0:
+                return None, "match_index must be >= 0"
+            if match_index >= match_count:
+                return None, f"match_index {match_index} out of range for {match_count} occurrences"
+        elif isinstance(original_position, int) and original_position >= 0:
+            # Backward-compatible anchor resolution by nearest character offset.
             match_index = min(range(match_count), key=lambda i: abs(matches[i] - original_position))
         else:
             match_index = 0
