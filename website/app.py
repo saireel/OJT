@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import hashlib
 import json
 import subprocess
 import threading
@@ -222,6 +223,46 @@ def extract_pr_info(url: str) -> dict | None:
     return None
 
 
+def _extract_confluence_page_ids_from_text(text: str) -> list[str]:
+    ids: list[str] = []
+    if not text:
+        return ids
+    conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", text)
+    for url in conf_urls:
+        pid = extract_confluence_page_id(url)
+        if pid and pid not in ids:
+            ids.append(pid)
+    return ids
+
+
+def _extract_prs_from_text(text: str) -> list[dict]:
+    found: list[dict] = []
+    if not text:
+        return found
+    pr_urls = re.findall(r"https?://github\.com/[^\s]+/pull/\d+", text)
+    for url in pr_urls:
+        info = extract_pr_info(url)
+        if info and info not in found:
+            found.append(info)
+    return found
+
+
+def _fallback_links_from_history(history: list) -> tuple[list[str], list[dict]]:
+    """Find most recent user message containing links and reuse those IDs for follow-up prompts."""
+    if not history:
+        return [], []
+
+    for entry in reversed(history):
+        if entry.get("role") != "user":
+            continue
+        text = str(entry.get("text", ""))
+        page_ids = _extract_confluence_page_ids_from_text(text)
+        prs = _extract_prs_from_text(text)
+        if page_ids or prs:
+            return page_ids, prs
+    return [], []
+
+
 def format_result(data) -> str:
     if isinstance(data, str):
         return data
@@ -249,6 +290,7 @@ YOUR CORE RULES:
 7. Only produce FINAL_ANSWER when the ENTIRE task is fully complete — not partially.
 8. If the user's intent is ambiguous, ask a clarifying question using FINAL_ANSWER.
 9. Do NOT auto-review pages unless the instructions or user explicitly ask for it.
+10. When an instructions page defines specific output requirements, derive a task contract from it and satisfy that exact contract. Do not substitute a generic template. If a built-in review tool does not fully satisfy the contract, use additional tools to complete the missing required output.
 
 RESPONSE FORMAT — you must ALWAYS use one of these two formats:
 
@@ -502,6 +544,307 @@ def _build_deterministic_execution_summary(user_msg: str, scratchpad: list) -> s
     return "\n".join(lines)
 
 
+def _has_success_for_tool(scratchpad: list, tool_name: str) -> bool:
+    for entry in scratchpad:
+        if entry.get("tool") != tool_name:
+            continue
+        raw = entry.get("raw_result")
+        if isinstance(raw, dict) and raw.get("success") is True:
+            return True
+    return False
+
+
+
+
+INSTRUCTION_CONTRACT_CACHE: dict[str, dict] = {}
+
+ALLOWED_CONTRACT_ACTIONS = {
+    "read_instructions",
+    "read_target_page",
+    "run_review",
+    "post_inline_comments",
+    "post_footer_comment",
+    "update_page",
+    "reply_with_summary",
+}
+
+ALLOWED_FOOTER_SECTIONS = {
+    "issue_total",
+    "severity_breakdown",
+    "triggered_categories",
+    "readability_metrics",
+    "overall_assessment",
+    "priority_issues",
+    "citations_status",
+    "accessibility_status",
+    "staleness_status",
+}
+
+CONTRACT_ACTION_TOOL_MAP = {
+    "run_review": ("review_confluence_page_content",),
+    "post_inline_comments": ("post_confluence_inline_comment", "review_confluence_page_content"),
+    "post_footer_comment": ("post_confluence_footer_comment", "review_confluence_page_content"),
+    "update_page": ("update_confluence_page",),
+}
+
+FOOTER_SECTION_CHECKS = {
+    "issue_total": ("issue", "issues found", "total issues"),
+    "severity_breakdown": ("severity", "error", "warning", "info"),
+    "triggered_categories": ("categor", "checklist", "grammar", "structure", "readability"),
+    "readability_metrics": ("flesch", "grade", "reading ease", "readability"),
+    "overall_assessment": ("overall", "excellent", "good", "moderate", "needs improvement", "assessment"),
+    "priority_issues": ("top", "priority", "critical", "1.", "2.", "3."),
+    "citations_status": ("citation", "reference", "source link"),
+    "accessibility_status": ("alt text", "accessibility", "image"),
+    "staleness_status": ("outdated", "stale", "date", "version"),
+}
+
+
+def _is_instruction_apply_request(user_msg: str) -> bool:
+    text = (user_msg or "").lower()
+    has_instruction_source = any(term in text for term in ("instruction", "instructions", "guideline", "guidelines"))
+    has_apply_intent = any(term in text for term in ("apply", "follow", "use", "based on"))
+    return has_instruction_source and has_apply_intent
+
+
+def _extract_json_object(text: str) -> dict | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _normalize_instruction_contract(raw_contract: dict | None) -> dict:
+    contract = raw_contract or {}
+    required_actions = []
+    for item in contract.get("required_actions", []):
+        if isinstance(item, str):
+            action = item.strip()
+            if action in ALLOWED_CONTRACT_ACTIONS:
+                required_actions.append({"action": action, "required": True, "details": ""})
+            continue
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip()
+        if action not in ALLOWED_CONTRACT_ACTIONS:
+            continue
+        required_actions.append({
+            "action": action,
+            "required": bool(item.get("required", True)),
+            "details": str(item.get("details", "")).strip(),
+        })
+
+    footer = contract.get("footer_requirements", {}) if isinstance(contract.get("footer_requirements", {}), dict) else {}
+    inline = contract.get("inline_requirements", {}) if isinstance(contract.get("inline_requirements", {}), dict) else {}
+    footer_sections = []
+    for section in footer.get("required_sections", []):
+        name = str(section).strip()
+        if name in ALLOWED_FOOTER_SECTIONS and name not in footer_sections:
+            footer_sections.append(name)
+
+    return {
+        "task_type": str(contract.get("task_type", "unknown")).strip() or "unknown",
+        "required_actions": required_actions,
+        "footer_requirements": {
+            "required": bool(footer.get("required", False)),
+            "required_sections": footer_sections,
+            "details": str(footer.get("details", "")).strip(),
+        },
+        "inline_requirements": {
+            "required": bool(inline.get("required", False)),
+            "coverage": str(inline.get("coverage", "unspecified")).strip() or "unspecified",
+            "details": str(inline.get("details", "")).strip(),
+        },
+        "completion_criteria": [str(item).strip() for item in contract.get("completion_criteria", []) if str(item).strip()],
+        "notes": [str(item).strip() for item in contract.get("notes", []) if str(item).strip()],
+    }
+
+
+def _extract_instruction_contract(user_msg: str, instructions_text: str) -> tuple[dict, str | None]:
+    cache_key = hashlib.sha1(f"{user_msg}\n---\n{instructions_text}".encode("utf-8")).hexdigest()
+    cached = INSTRUCTION_CONTRACT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached, None
+
+    prompt = f"""Extract an execution contract from the instruction text below.
+Return JSON only. Do not wrap it in markdown.
+
+Allowed action values:
+- read_instructions
+- read_target_page
+- run_review
+- post_inline_comments
+- post_footer_comment
+- update_page
+- reply_with_summary
+
+Allowed footer section values:
+- issue_total
+- severity_breakdown
+- triggered_categories
+- readability_metrics
+- overall_assessment
+- priority_issues
+- citations_status
+- accessibility_status
+- staleness_status
+
+Return this exact JSON shape:
+{{
+  "task_type": "review|edit|mixed|unknown",
+  "required_actions": [
+    {{"action": "read_instructions", "required": true, "details": "..."}}
+  ],
+  "inline_requirements": {{
+    "required": true,
+    "coverage": "all|some|none|unspecified",
+    "details": "..."
+  }},
+  "footer_requirements": {{
+    "required": true,
+    "required_sections": ["severity_breakdown", "readability_metrics"],
+    "details": "..."
+  }},
+  "completion_criteria": ["..."],
+  "notes": ["..."]
+}}
+
+User request:
+{user_msg}
+
+Instruction text:
+{instructions_text}
+"""
+
+    response, err = call_llm(prompt)
+    if err:
+        return _normalize_instruction_contract(None), err
+
+    parsed = _extract_json_object(response)
+    if parsed is None:
+        return _normalize_instruction_contract(None), "Could not parse instruction contract JSON"
+
+    contract = _normalize_instruction_contract(parsed)
+    INSTRUCTION_CONTRACT_CACHE[cache_key] = contract
+    return contract, None
+
+
+def _has_success_for_tool_on_page(scratchpad: list, tool_name: str, page_id: str) -> bool:
+    for entry in scratchpad:
+        if entry.get("tool") != tool_name:
+            continue
+        raw = entry.get("raw_result")
+        if not (isinstance(raw, dict) and raw.get("success") is True):
+            continue
+        input_data = entry.get("input", {})
+        if isinstance(input_data, dict) and str(input_data.get("page_id", "")) == str(page_id):
+            return True
+    return False
+
+
+def _get_latest_successful_footer_comment_text(scratchpad: list, page_id: str) -> str:
+    for entry in reversed(scratchpad):
+        if entry.get("tool") != "post_confluence_footer_comment":
+            continue
+        raw = entry.get("raw_result")
+        if not (isinstance(raw, dict) and raw.get("success") is True):
+            continue
+        input_data = entry.get("input", {})
+        if isinstance(input_data, dict) and str(input_data.get("page_id", "")) == str(page_id):
+            return str(input_data.get("comment", ""))
+    return ""
+
+
+def _validate_footer_against_contract(scratchpad: list, target_page_id: str, contract: dict) -> list[str]:
+    footer_requirements = contract.get("footer_requirements", {})
+    if not footer_requirements.get("required"):
+        return []
+
+    footer_text = _get_latest_successful_footer_comment_text(scratchpad, target_page_id).lower()
+    if not footer_text:
+        return ["footer comment"]
+
+    missing = []
+    for section_name in footer_requirements.get("required_sections", []):
+        checks = FOOTER_SECTION_CHECKS.get(section_name, ())
+        if not any(token in footer_text for token in checks):
+            missing.append(f"footer section: {section_name}")
+    return missing
+
+
+def _build_instruction_contract_context(user_msg: str, scratchpad: list, link_context: str) -> str:
+    if not _is_instruction_apply_request(user_msg):
+        return ""
+
+    page_ids = _extract_page_ids_from_link_context(link_context)
+    if len(page_ids) < 2:
+        return ""
+
+    instructions_text = _get_latest_page_content_observation(scratchpad, page_ids[0])
+    if not instructions_text:
+        return "\nInstruction contract: not available yet. Fetch the instructions page first.\n"
+
+    contract, err = _extract_instruction_contract(user_msg, instructions_text)
+    if err:
+        return "\nInstruction contract: extraction failed. Read the instructions carefully and satisfy their exact outputs before FINAL_ANSWER.\n"
+
+    return "\nDerived instruction contract that must be satisfied exactly:\n" + json.dumps(contract, indent=2) + "\n"
+
+
+
+def _needs_instruction_compliance(user_msg: str, scratchpad: list, link_context: str) -> tuple[bool, str]:
+    if not _is_instruction_apply_request(user_msg):
+        return False, ""
+
+    page_ids = _extract_page_ids_from_link_context(link_context)
+    if len(page_ids) < 2:
+        return False, ""
+
+    instructions_page_id = page_ids[0]
+    target_page_id = page_ids[1]
+
+    instructions_text = _get_latest_page_content_observation(scratchpad, instructions_page_id)
+    if not instructions_text:
+        return True, "VERIFICATION BLOCK: Instructions were not fetched/read yet. Fetch the instructions page content first."
+
+    target_text = _get_latest_page_content_observation(scratchpad, target_page_id)
+    if not target_text:
+        return True, "VERIFICATION BLOCK: Target page was not fetched/read yet. Fetch the target page content first."
+
+    contract, err = _extract_instruction_contract(user_msg, instructions_text)
+    if err:
+        return True, f"VERIFICATION BLOCK: Could not derive the instruction contract yet ({err}). Continue from the actual instruction text before FINAL_ANSWER."
+
+    missing = []
+    for action in contract.get("required_actions", []):
+        if not action.get("required", True):
+            continue
+        action_name = action.get("action", "")
+        if action_name in ("read_instructions", "read_target_page", "reply_with_summary"):
+            continue
+        tool_names = CONTRACT_ACTION_TOOL_MAP.get(action_name, ())
+        if tool_names and not any(_has_success_for_tool_on_page(scratchpad, tool_name, target_page_id) for tool_name in tool_names):
+            missing.append(action.get("details") or action_name.replace("_", " "))
+
+    missing.extend(_validate_footer_against_contract(scratchpad, target_page_id, contract))
+
+    inline_req = contract.get("inline_requirements", {})
+    if inline_req.get("required") and not any(
+        _has_success_for_tool_on_page(scratchpad, tool_name, target_page_id)
+        for tool_name in CONTRACT_ACTION_TOOL_MAP["post_inline_comments"]
+    ):
+        missing.append("inline comments covering all required issues" if inline_req.get("coverage") == "all" else "inline comments")
+
+    if missing:
+        return True, "VERIFICATION BLOCK: Instruction compliance incomplete. Missing: " + ", ".join(dict.fromkeys(missing))
+
+    return False, ""
+
+
 def _is_grammar_only_request(user_msg: str) -> bool:
     text = (user_msg or "").lower()
     has_grammar = "grammar" in text
@@ -513,6 +856,149 @@ def _is_grammar_only_request(user_msg: str) -> bool:
     asks_broad = any(term in text for term in broad_terms)
     return has_grammar and has_review and not asks_broad
 
+
+
+
+def _calculate_flesch_reading_ease(text: str) -> float:
+    """Calculate Flesch Reading Ease score. Higher = easier to read (0-100+)."""
+    sentences = len([s for s in text.split('.') if s.strip()])
+    if sentences == 0:
+        return 0.0
+    
+    words = text.split()
+    word_count = len(words)
+    if word_count == 0:
+        return 0.0
+    
+    # Count syllables (rough approximation)
+    def count_syllables(word):
+        word = word.lower()
+        vowels = 'aeiouy'
+        syllable_count = 0
+        previous_was_vowel = False
+        for char in word:
+            is_vowel = char in vowels
+            if is_vowel and not previous_was_vowel:
+                syllable_count += 1
+            previous_was_vowel = is_vowel
+        if word.endswith('e'):
+            syllable_count -= 1
+        if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+            syllable_count += 1
+        return max(1, syllable_count)
+    
+    syllable_count = sum(count_syllables(w) for w in words)
+    
+    # Flesch Reading Ease formula
+    fre = 206.835 - 1.015 * (word_count / sentences) - 84.6 * (syllable_count / word_count)
+    return max(0, min(100, fre))  # Clamp between 0-100
+
+
+def _calculate_flesch_kincaid_grade(text: str) -> float:
+    """Calculate Flesch-Kincaid Grade Level (US grade)."""
+    sentences = len([s for s in text.split('.') if s.strip()])
+    if sentences == 0:
+        return 0.0
+    
+    words = text.split()
+    word_count = len(words)
+    if word_count == 0:
+        return 0.0
+    
+    # Count syllables (same logic as above)
+    def count_syllables(word):
+        word = word.lower()
+        vowels = 'aeiouy'
+        syllable_count = 0
+        previous_was_vowel = False
+        for char in word:
+            is_vowel = char in vowels
+            if is_vowel and not previous_was_vowel:
+                syllable_count += 1
+            previous_was_vowel = is_vowel
+        if word.endswith('e'):
+            syllable_count -= 1
+        if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+            syllable_count += 1
+        return max(1, syllable_count)
+    
+    syllable_count = sum(count_syllables(w) for w in words)
+    
+    # Flesch-Kincaid Grade Level formula
+    grade = 0.39 * (word_count / sentences) + 11.8 * (syllable_count / word_count) - 15.59
+    return max(0, grade)
+
+
+def _detect_footer_structure_requirements(instructions_text: str) -> dict:
+    """Detect what structured elements the footer must contain based on instructions."""
+    inst = instructions_text.lower()
+    
+    requirements = {
+        "needs_severity_breakdown": any(k in inst for k in ["severity", "error", "warning", "info", "critical"]),
+        "needs_categories": any(k in inst for k in ["categories", "checklist categories", "triggered"]),
+        "needs_readability_metrics": any(k in inst for k in ["flesch", "readability", "grade level", "reading ease"]),
+        "needs_quality_assessment": any(k in inst for k in ["overall assessment", "quality", "excellent", "good", "moderate", "needs improvement"]),
+        "needs_top_issues": any(k in inst for k in ["top 3", "top 5", "most critical", "priority"]),
+        "is_comprehensive_review": any(k in inst for k in ["footer summary", "footer review", "mandatory", "must", "always"])
+    }
+    
+    return requirements
+
+
+def _extract_footer_requirements_from_instructions(instructions_page_content: str) -> dict:
+    """Extract detailed footer requirements from instructions page."""
+    req = _detect_footer_structure_requirements(instructions_page_content)
+    
+    reqs = {
+        "needs_severity_breakdown": req["needs_severity_breakdown"],
+        "needs_categories": req["needs_categories"],
+        "needs_readability_metrics": req["needs_readability_metrics"],
+        "needs_quality_assessment": req["needs_quality_assessment"],
+        "needs_top_issues": req["needs_top_issues"],
+        "is_mandatory": "mandatory" in instructions_page_content.lower() or "footer summary" in instructions_page_content.lower()
+    }
+    
+    return reqs
+
+
+def _validate_footer_structure(scratchpad: list, target_page_id: str, requirements: dict) -> tuple[bool, list[str]]:
+    """Validate that footer comment contains required structure elements."""
+    missing = []
+    
+    # Find if a footer comment was actually posted for this page
+    footer_results = [
+        r for r in scratchpad 
+        if r.get("tool") == "post_confluence_footer_comment" 
+        and r.get("input", {}).get("page_id") == target_page_id
+        and r.get("raw_result", {}).get("success")
+    ]
+    
+    if not footer_results:
+        if requirements.get("is_mandatory"):
+            missing.append("footer comment not posted")
+        return len(missing) == 0, missing
+    
+    # Get the last successful footer comment text
+    last_footer_result = footer_results[-1]
+    footer_text = last_footer_result.get("input", {}).get("comment", "").lower()
+    
+    # Check for required elements
+    if requirements.get("needs_severity_breakdown") and not any(k in footer_text for k in ["error", "warning", "info", "severity"]):
+        missing.append("severity breakdown")
+    
+    if requirements.get("needs_categories") and not any(k in footer_text for k in ["categor", "check", "grammar", "structure"]):
+        missing.append("categories section")
+    
+    if requirements.get("needs_readability_metrics") and not any(k in footer_text for k in ["flesch", "grade", "readability"]):
+        missing.append("readability metrics (Flesch scores)")
+    
+    if requirements.get("needs_quality_assessment") and not any(k in footer_text for k in ["excellent", "good", "moderate", "needs improvement", "assessment"]):
+        missing.append("quality assessment")
+    
+    if requirements.get("needs_top_issues") and not any(k in footer_text for k in ["top", "critical", "priority", "1.", "2.", "3."]):
+        missing.append("top issues prioritization")
+    
+    return len(missing) == 0, missing
 
 # -- Agent Loop (ReAct + Verify-Then-Continue) ----------------------------
 
@@ -551,6 +1037,7 @@ def _build_agent_prompt(
         system_prompt + "\n\n"
         + link_context
         + history_context
+        + _build_instruction_contract_context(user_msg, scratchpad, link_context)
         + scratchpad_text
         + f"\nUser request: {user_msg}\n"
         + verification_reminder
@@ -601,6 +1088,12 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             needs_more, verify_msg = _needs_occurrence_completion(user_msg, scratchpad, link_context)
             if needs_more:
                 print("[AGENT] Completion gate blocked premature FINAL_ANSWER.", flush=True)
+                scratchpad.append({"tool": "verifier", "input": {}, "output": verify_msg, "raw_result": {"success": False}})
+                continue
+
+            needs_more, verify_msg = _needs_instruction_compliance(user_msg, scratchpad, link_context)
+            if needs_more:
+                print("[AGENT] Instruction compliance gate blocked premature FINAL_ANSWER.", flush=True)
                 scratchpad.append({"tool": "verifier", "input": {}, "output": verify_msg, "raw_result": {"success": False}})
                 continue
 
@@ -740,20 +1233,18 @@ def chat():
     if not user_msg:
         return jsonify({"error": "Empty prompt"}), 400
 
-    # Extract detected links for badge display
-    conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
-    page_ids: list[str] = []
-    for url in conf_urls:
-        pid = extract_confluence_page_id(url)
-        if pid and pid not in page_ids:
-            page_ids.append(pid)
+    # Extract detected links from the current prompt first
+    page_ids = _extract_confluence_page_ids_from_text(user_msg)
+    prs = _extract_prs_from_text(user_msg)
+    link_source = "current_message"
 
-    pr_urls = re.findall(r"https?://github\.com/[^\s]+/pull/\d+", user_msg)
-    prs: list[dict] = []
-    for url in pr_urls:
-        info = extract_pr_info(url)
-        if info:
-            prs.append(info)
+    # If follow-up prompt has no links, reuse the most recent linked user message.
+    if not page_ids and not prs:
+        hist_page_ids, hist_prs = _fallback_links_from_history(history)
+        if hist_page_ids or hist_prs:
+            page_ids = hist_page_ids
+            prs = hist_prs
+            link_source = "history_fallback"
 
     detected = [f"confluence:{pid}" for pid in page_ids]
     detected += [f"pr:{p['owner']}/{p['repo']}#{p['pr_number']}" for p in prs]
@@ -761,12 +1252,18 @@ def chat():
     # Build link context
     link_context = ""
     if page_ids:
-        link_context += "Detected Confluence page IDs from the user's message:\n"
+        if link_source == "history_fallback":
+            link_context += "Detected Confluence page IDs from recent conversation history (follow-up context):\n"
+        else:
+            link_context += "Detected Confluence page IDs from the user's message:\n"
         for i, pid in enumerate(page_ids):
             link_context += f"  Link {i+1}: page_id = \"{pid}\"\n"
         link_context += "\n"
     if prs:
-        link_context += "Detected GitHub PRs from the user's message:\n"
+        if link_source == "history_fallback":
+            link_context += "Detected GitHub PRs from recent conversation history (follow-up context):\n"
+        else:
+            link_context += "Detected GitHub PRs from the user's message:\n"
         for p in prs:
             owner, repo, pr_num = p["owner"], p["repo"], p["pr_number"]
             link_context += f"  PR: {owner}/{repo}#{pr_num}\n"

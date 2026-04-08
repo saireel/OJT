@@ -13,6 +13,72 @@ logger = logging.getLogger(__name__)
 class ReviewActions:
     """Review orchestration, checks, and evaluation logic."""
 
+
+    @staticmethod
+    def _calculate_flesch_reading_ease(text: str) -> float:
+        """Calculate Flesch Reading Ease score. Higher = easier to read (0-100+)."""
+        sentences = len([s for s in text.split('.') if s.strip()])
+        if sentences == 0:
+            return 0.0
+        
+        words = text.split()
+        word_count = len(words)
+        if word_count == 0:
+            return 0.0
+        
+        def count_syllables(word):
+            word = word.lower()
+            vowels = 'aeiouy'
+            syllable_count = 0
+            previous_was_vowel = False
+            for char in word:
+                is_vowel = char in vowels
+                if is_vowel and not previous_was_vowel:
+                    syllable_count += 1
+                previous_was_vowel = is_vowel
+            if word.endswith('e'):
+                syllable_count -= 1
+            if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+                syllable_count += 1
+            return max(1, syllable_count)
+        
+        syllable_count = sum(count_syllables(w) for w in words)
+        fre = 206.835 - 1.015 * (word_count / sentences) - 84.6 * (syllable_count / word_count)
+        return max(0, min(100, fre))
+
+    @staticmethod
+    def _calculate_flesch_kincaid_grade(text: str) -> float:
+        """Calculate Flesch-Kincaid Grade Level (US grade)."""
+        sentences = len([s for s in text.split('.') if s.strip()])
+        if sentences == 0:
+            return 0.0
+        
+        words = text.split()
+        word_count = len(words)
+        if word_count == 0:
+            return 0.0
+        
+        def count_syllables(word):
+            word = word.lower()
+            vowels = 'aeiouy'
+            syllable_count = 0
+            previous_was_vowel = False
+            for char in word:
+                is_vowel = char in vowels
+                if is_vowel and not previous_was_vowel:
+                    syllable_count += 1
+                previous_was_vowel = is_vowel
+            if word.endswith('e'):
+                syllable_count -= 1
+            if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+                syllable_count += 1
+            return max(1, syllable_count)
+        
+        syllable_count = sum(count_syllables(w) for w in words)
+        grade = 0.39 * (word_count / sentences) + 11.8 * (syllable_count / word_count) - 15.59
+        return max(0, grade)
+
+
     def __init__(self, confluence_api, syntax_actions):
         """Store references to API and syntax modules."""
         self.api = confluence_api
@@ -212,14 +278,14 @@ class ReviewActions:
         logger.info("[REVIEW] Running context_noise check")
         seen = set()
 
-        # Pattern 1: Original — very long words (18+ chars) or words with embedded digits
+        # Pattern 1: Original - very long words (18+ chars) or words with embedded digits
         pattern_long = re.compile(r"\b(?:[A-Za-z]{18,}|[A-Za-z]*\d[A-Za-z]\w*)\b")
 
-        # Pattern 2: Short garbled words — 4+ consecutive consonants (not in known patterns)
+        # Pattern 2: Short garbled words - 4+ consecutive consonants (not in known patterns)
         # Catches: "ngeks", "adwasd", "kjasdkas", "iadawdasdasncluding"
         pattern_garble = re.compile(r"\b[a-zA-Z]*[bcdfghjklmnpqrstvwxyz]{4,}[a-zA-Z]*\b", re.IGNORECASE)
 
-        # Pattern 3: Concatenated words — lowercase letter followed by uppercase mid-word
+        # Pattern 3: Concatenated words - lowercase letter followed by uppercase mid-word
         # without a space/hyphen (e.g., "astorage", "blockbased", "objectbased")
         pattern_concat = re.compile(r"\b[a-z]+[A-Z][a-z]+\b")
 
@@ -1141,7 +1207,7 @@ class ReviewActions:
         return selected
 
     def _build_footer_review_comment(self, state: Dict[str, Any]) -> str:
-        """Build the footer summary comment from the collected review findings."""
+        """Build comprehensive footer summary with readability metrics, severity breakdown, and structured analysis."""
         issue_types = Counter(issue.get("type", "unknown") for issue in state["issues"])
         total_issues = len(state["issues"])
 
@@ -1153,143 +1219,145 @@ class ReviewActions:
 
         sections = []
 
-        sections.append("<p>Review summary</p>")
+        # === HEADER ===
+        sections.append("<h3>Review Summary</h3>")
         if "doc_type" in state:
             doc_type = state["doc_type"]
-            sections.append(f"<p>Document type: <strong>{doc_type.replace('_', ' ').title()}</strong></p>")
+            sections.append(f"<p><strong>Document:</strong> {doc_type.replace('_', ' ').title()}</p>")
 
+        # === MAIN FINDINGS ===
         if total_issues == 0:
-            sections.append("<p>Result: No issues detected. Well done.</p>")
+            sections.append("<p><strong>Result:</strong> No issues detected. Excellent work!</p>")
         else:
-            # Severity based on error/warning counts, not just total
             if errors > 5:
-                severity = "high"
+                severity = "High"
             elif errors > 0 or warnings > 5:
-                severity = "moderate"
+                severity = "Moderate"
             else:
-                severity = "low"
-            sections.append(f"<p>Result: {total_issues} issue(s) found ({severity} severity).</p>")
-            sev_parts = []
-            if errors:
-                sev_parts.append(f"{errors} error(s)")
-            if warnings:
-                sev_parts.append(f"{warnings} warning(s)")
-            if infos:
-                sev_parts.append(f"{infos} info")
-            sections.append(f"<p>Severity breakdown: {', '.join(sev_parts)}</p>")
-        type_names = {
-                "grammar": "Grammar & spelling",
-                "misspelling": "Misspelling",
-                "context_noise": "Suspicious/malformed words",
-                "repeated_word": "Repeated words",
-                "long_sentence": "Long sentences",
-                "long_paragraph": "Long paragraphs",
-                "structure": "Page structure",
-                "statistics_validation": "Data/statistics consistency",
-                "citation": "Citation & references",
-                "readability": "Readability",
-                "duplicate_content": "Duplicate content",
-                "table_validation": "Table/data validation",
-                "spelling_consistency": "Spelling consistency",
-                "capitalization_consistency": "Capitalization consistency",
-                "metric_inconsistency": "Metric inconsistency",
-            }
-        
-        # Readability score if available
-        readability = state.get("readability")
-        if readability:
-            fre = readability["flesch_ease"]
-            fkgl = readability["fk_grade"]
-            if fre >= 60:
-                level = "Easy"
-            elif fre >= 50:
-                level = "Standard"
-            elif fre >= 30:
-                level = "Difficult"
-            else:
-                level = "Very difficult"
-            sections.append(
-                f"<p>Readability: Flesch score {fre} ({level}), "
-                f"grade level {fkgl}</p>"
-            )
-
-        if issue_types:
-            sections.append("<p>Issues by type:</p>")
-            items = []
+                severity = "Low"
+            sections.append(f"<p><strong>Issues Found:</strong> {total_issues} total ({severity} severity)</p>")
             
-            # Sort: errors first, then warnings, then info
-            sev_order = {"error": 0, "warning": 1, "info": 2}
-            type_sev = {}
-            for issue in state["issues"]:
-                t = issue.get("type", "unknown")
-                s = issue.get("severity", "info")
-                if t not in type_sev or sev_order.get(s, 3) < sev_order.get(type_sev[t], 3):
-                    type_sev[t] = s
-            for issue_type in sorted(issue_types.keys(), key=lambda t: (sev_order.get(type_sev.get(t, "info"), 3), t)):
-                count = issue_types[issue_type]
-                display_name = type_names.get(issue_type, issue_type)
-                sev_label = type_sev.get(issue_type, "info").upper()
-                items.append(f"<li>[{sev_label}] {display_name}: {count}</li>")
-            if items:
-                sections.append(f"<ul>{''.join(items)}</ul>")
+        # === SEVERITY BREAKDOWN TABLE ===
+        sections.append("<p><strong>Severity Breakdown:</strong></p>")
+        severity_html = "<table><tr><th>Level</th><th>Count</th></tr>"
+        severity_html += f"<tr><td>Errors</td><td>{errors}</td></tr>"
+        severity_html += f"<tr><td>Warnings</td><td>{warnings}</td></tr>"
+        severity_html += f"<tr><td>Informational</td><td>{infos}</td></tr>"
+        severity_html += "</table>"
+        sections.append(severity_html)
 
-        # Top priorities (errors first)
-        if errors > 0:
-            error_issues = [i for i in state["issues"] if i.get("severity") == "error"]
-            seen = set()
-            top = []
-            for issue in error_issues:
-                key = issue["type"]
-                if key not in seen:
-                    seen.add(key)
-                    top.append(type_names.get(key, key))
-                if len(top) >= 3:
-                    break
-            sections.append(f"<p>Top priorities: {', '.join(top)}</p>")
+        # === CATEGORIES/CHECKLIST TRIGGERED ===
+        if issue_types:
+            sections.append("<p><strong>Issue Categories:</strong></p>")
+            category_items = []
+            type_names = {
+                "grammar": "Grammar & Spelling",
+                "misspelling": "Misspelling Detection",
+                "malformed_word": "Malformed Words",
+                "repeated_word": "Repeated Words",
+                "structure": "Page Structure",
+                "heading_nesting": "Heading Nesting",
+                "acronym_expansion": "Acronym Usage",
+                "empty_section": "Empty Sections",
+                "consistency": "Writing Consistency",
+                "passive_voice": "Passive Voice",
+                "list_consistency": "List Consistency",
+                "statistics_validation": "Data Validation",
+                "context_noise": "Suspicious Text",
+                "profanity": "Profanity/Off-Topic",
+                "topic_coherence": "Topic Coherence",
+                "readability": "Readability Issues",
+                "citation": "Citation Gaps",
+                "alt_text": "Missing Alt Text",
+                "fragment": "Sentence Fragments",
+                "staleness": "Outdated References",
+                "formatting": "Excessive Formatting",
+                "long_sentence": "Long Sentences",
+                "long_paragraph": "Long Paragraphs",
+                "duplicate_content": "Duplicate Content",
+                "table_validation": "Table Issues"
+            }
+            for issue_type, count in sorted(issue_types.items(), key=lambda x: x[1], reverse=True):
+                type_label = type_names.get(issue_type, issue_type.replace("_", " ").title())
+                category_items.append(f"{type_label} ({count})")
+            
+            if category_items:
+                items_html = "".join(f"<li>{item}</li>" for item in category_items)
+                sections.append(f"<ul>{items_html}</ul>")
 
+        # === READABILITY METRICS ===
+        page_text = state.get("text", "")
+        if page_text:
+            # Calculate readability metrics using static methods
+            try:
+                flesch_ease = self._calculate_flesch_reading_ease(page_text)
+                flesch_grade = self._calculate_flesch_kincaid_grade(page_text)
+                
+                sections.append("<p><strong>Readability Metrics:</strong></p>")
+                readability_html = "<table><tr><th>Metric</th><th>Score</th></tr>"
+                readability_html += f"<tr><td>Flesch Reading Ease</td><td>{flesch_ease:.1f}</td></tr>"
+                readability_html += f"<tr><td>Flesch-Kincaid Grade Level</td><td>{flesch_grade:.1f}</td></tr>"
+                readability_html += "</table>"
+                sections.append(readability_html)
+            except Exception as e:
+                logger.warning("[REVIEW] Could not import readability calculators")
+
+        # === QUALITY ASSESSMENT ===
+        sections.append("<p><strong>Overall Quality Assessment:</strong></p>")
+        if total_issues == 0:
+            assessment = "Excellent - This page is well-written, well-structured, and requires no changes."
+        elif errors == 0 and total_issues <= 3:
+            assessment = "Good - Minor issues present. The content is generally well-written with only small improvements needed."
+        elif errors <= 2 and total_issues <= 10:
+            assessment = "Moderate - Several issues found. Content is clear but would benefit from improvements in clarity, consistency, and technical accuracy."
+        else:
+            assessment = "Needs Improvement - Significant issues affecting clarity, accuracy, and professionalism. Prioritize error-level items for immediate attention."
+        sections.append(f"<p>{assessment}</p>")
+
+        # === RECOMMENDATIONS ===
         summary_parts = []
-        if state["footer_notes"]:
+        if state.get("footer_notes"):
             summary_parts.extend(state["footer_notes"])
+        
         if issue_types.get("long_sentence", 0) > 0:
-            summary_parts.append("split long sentences for better readability")
+            summary_parts.append(f"Break {issue_types.get('long_sentence')} long sentence(s) into shorter, clearer statements")
         if issue_types.get("long_paragraph", 0) > 0:
-            summary_parts.append("break long paragraphs into shorter blocks")
+            summary_parts.append(f"Split {issue_types.get('long_paragraph')} long paragraph(s) for improved readability")
         if issue_types.get("repeated_word", 0) > 0:
-            summary_parts.append("remove repeated words")
+            summary_parts.append(f"Remove {issue_types.get('repeated_word')} instance(s) of repeated consecutive words")
         if issue_types.get("grammar", 0) > 0 or issue_types.get("misspelling", 0) > 0:
-            summary_parts.append("review and correct grammar/spelling issues")
+            summary_parts.append("Review and correct grammar, spelling, and punctuation errors")
         if issue_types.get("context_noise", 0) > 0:
-            summary_parts.append("verify suspicious or potentially malformed words")
+            summary_parts.append("Verify or remove suspicious/malformed words and text")
         if issue_types.get("statistics_validation", 0) > 0:
-            summary_parts.append("verify and correct data/statistical values for internal consistency")
+            summary_parts.append("Validate all numerical data, statistics, and calculations")
         if issue_types.get("citation", 0) > 0:
-            summary_parts.append("fix or complete citation references")
+            summary_parts.append("Add or complete missing citation references and source links")
         if issue_types.get("duplicate_content", 0) > 0:
-            summary_parts.append("merge or remove duplicate paragraphs")
+            summary_parts.append("Eliminate or consolidate duplicate content and paragraphs")
         if issue_types.get("table_validation", 0) > 0:
-            summary_parts.append("verify table data accuracy (totals, percentages, empty cells)")
+            summary_parts.append("Review and correct table data, totals, and formatting")
+        if issue_types.get("empty_section", 0) > 0:
+            summary_parts.append("Fill or remove empty sections with no content")
+        if issue_types.get("profanity", 0) > 0:
+            summary_parts.append("Remove unprofessional language and off-topic content")
+        if issue_types.get("topic_coherence", 0) > 0:
+            summary_parts.append("Ensure all content is semantically relevant to the document topic")
 
         if summary_parts:
-            sections.append("<p>Recommendations:</p>")
-            items = ''.join(f"<li>{part}</li>" for part in summary_parts)
-            sections.append(f"<ul>{items}</ul>")
-
-        if total_issues == 0:
-            sections.append("<p>Overall: This page is well-written and structured. No changes needed.</p>")
-        elif errors == 0 and total_issues <= 5:
-            sections.append("<p>Overall: Overall quality is good. Minor improvements suggested above will enhance clarity and correctness.</p>")
-        elif errors <= 3 and total_issues <= 15:
-            sections.append("<p>Overall: Several issues found. Review and apply suggestions above to improve content quality and readability.</p>")
-        else:
-            sections.append("<p>Overall: Significant issues found. Please prioritize the error-level items above to substantially improve page quality.</p>")
+            sections.append("<p><strong>Top Recommendations (Priority Order):</strong></p>")
+            # Limit to top 5-7 recommendations
+            priority_items = summary_parts[:7]
+            items_html = "".join(f"<li>{part}</li>" for part in priority_items)
+            sections.append(f"<ol>{items_html}</ol>")
 
         fallback_comments = state.get("footer_fallback_comments", [])
         if fallback_comments:
-            sections.append("<p>Notes (inline placement fallback):</p>")
-            items = ''.join(f"<li>{comment}</li>" for comment in fallback_comments[:20])
-            sections.append(f"<ul>{items}</ul>")
+            sections.append("<p><strong>Additional Inline Placement Notes:</strong></p>")
+            items_html = "".join(f"<li>{comment}</li>" for comment in fallback_comments[:10])
+            sections.append(f"<ul>{items_html}</ul>")
 
-        return ''.join(sections)
+        return "".join(sections)
 
     def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Run the full page review workflow using the configured checklist source."""
@@ -1312,6 +1380,7 @@ class ReviewActions:
 
         state = {
             "issues": [],
+            "text": text,  # Page content for readability metrics
             "comments_posted": 0,
             "footer_fallback_comments_posted": 0,
             "footer_notes": [],
