@@ -1,3 +1,8 @@
+# app.py
+# This is the main backend server file for the web application.
+# It uses Flask (a Python web framework) to provide API endpoints and web pages.
+# The backend also acts as a bridge between the web UI, a local AI agent, and external tools.
+
 import sys
 import os
 import re
@@ -11,18 +16,31 @@ import time
 from flask import Flask, render_template, request, jsonify
 import requests
 
+# --- Configuration and Setup ---
+
+# Define paths to important files and directories
 MCP_SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MCP_SERVER_SCRIPT = os.path.join(MCP_SERVER_DIR, "mcp_tools.py")
 
+
+# Create the Flask app
 app = Flask(__name__)
 
+# URL for the Copilot Bridge (AI agent)
 COPILOT_BRIDGE_URL = "http://127.0.0.1:5100/api/prompt"
+
+# Path to the feedback file where users can report false positives (e.g. terms wrongly flagged as noise)
+FEEDBACK_FILE = os.path.join(os.path.dirname(__file__), "feedback_log.json")
+
+# Maximum steps the AI agent can take in a single task
 
 MAX_AGENT_STEPS = 20  # Raised — acts as safety net, not a kill switch
 
 
-# -- MCP Client (stdio JSON-RPC) ----------------------------------------
 
+# --- MCP Client Class ---
+# This class manages communication with the FastMCP server (an external tool).
+# It starts the server if needed, sends requests, and receives responses.
 class MCPClient:
     """Communicates with the FastMCP server over stdio using JSON-RPC."""
 
@@ -187,12 +205,12 @@ class MCPClient:
             except Exception:
                 proc.kill()
 
-
+# Create a single instance of the MCP client to use throughout the app
 mcp_client = MCPClient()
 
 
-# -- Copilot Bridge (LLM) ------------------------------------------------
-
+# --- Copilot Bridge (LLM) ---
+# This function sends prompts to the Copilot Bridge (AI agent) and returns the response.
 def call_llm(prompt: str) -> tuple[str, str | None]:
     """Send a prompt to the LLM (Copilot) and return (response, error)."""
     try:
@@ -209,7 +227,8 @@ def call_llm(prompt: str) -> tuple[str, str | None]:
         return "", str(e)
 
 
-# -- Helpers -------------------------------------------------------------
+# --- Helper Functions ---
+# These functions help extract information from user input, such as Confluence page IDs or GitHub PR info.
 
 def extract_confluence_page_id(url: str) -> str | None:
     m = re.search(r"/pages/(\d+)", url)
@@ -263,20 +282,47 @@ def _fallback_links_from_history(history: list) -> tuple[list[str], list[dict]]:
     return [], []
 
 
+def _load_recent_feedback(limit: int = 20) -> str:
+    """Load recent user feedback so the AI can learn from past false positives."""
+    if not os.path.exists(FEEDBACK_FILE):
+        return ""
+    try:
+        with open(FEEDBACK_FILE, "r", encoding="utf-8") as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        if not entries:
+            return ""
+        recent = entries[-limit:]
+        feedback_lines = []
+        for entry in recent:
+            term = entry.get("term", "")
+            sentence = entry.get("sentence", "")
+            feedback = entry.get("feedback", "")
+            feedback_lines.append(f'  - Term: "{term}" | Context: "{sentence}" | User said: {feedback}')
+        return (
+            "\nUSER FEEDBACK ON PAST FLAGS (learn from these — do NOT repeat these mistakes):\n"
+            + "\n".join(feedback_lines) + "\n"
+        )
+    except Exception:
+        return ""
+
+
 def format_result(data) -> str:
     if isinstance(data, str):
         return data
     return json.dumps(data, indent=2, default=str)
 
 
-# -- Routes --------------------------------------------------------------
-
+# --- Flask Routes ---
+# These define the web pages and API endpoints the backend provides.
 @app.route("/")
 def index():
+    # Renders the main web page (index.html)
     return render_template("index.html")
 
 
-# -- Agent System Prompt -------------------------------------------------
+# --- Agent System Prompt ---
+# This is a long string that defines the rules and workflow for the AI agent.
+# It tells the agent how to process user requests, use tools, and when to stop.
 
 AGENT_SYSTEM_PROMPT = """You are an autonomous AI agent called MunnAI.
 
@@ -318,8 +364,9 @@ Available tools:
    - Use ONLY when the user explicitly asks to review a page OR when instructions say to review.
 
 2. get_page_content_by_sections_tool
-   - Fetches the content of a Confluence page (read-only, does NOT post anything).
+   - Fetches the content of a Confluence page split into sections (read-only, does NOT post anything).
    - Args: {"page_id": "..."}
+   - Returns the FULL page content split into manageable sections.
    - Use to READ a page before deciding what to do.
 
 3. post_confluence_footer_comment
@@ -337,12 +384,26 @@ Available tools:
    - Args: {"repo": "repo_name", "pr_number": 123, "checklist": []}
 
 6. get_confluence_page_content
-   - Gets raw Confluence page content.
+   - Gets the FULL raw HTML storage content of a Confluence page.
    - Args: {"page_id": "..."}
+   - Use this when you need the complete, untruncated page content (e.g., for extracting ALL key points).
 
 7. update_confluence_page
-   - Updates the content of a Confluence page.
+   - Updates the ENTIRE content of a Confluence page (full replacement).
    - Args: {"page_id": "...", "title": "...", "content": "...", "version": 1, "message": "..."}
+   - WARNING: This replaces the ENTIRE page body. If you pass incomplete content, the rest of the page will be LOST.
+   - Only use this for full page rewrites. For text replacements, use find_and_replace_in_confluence_page instead.
+
+8. find_and_replace_in_confluence_page
+   - SAFELY replaces specific text in a Confluence page without losing any other content.
+   - Args: {"page_id": "...", "find_text": "text to find", "replace_text": "replacement text", "replace_all": true}
+   - This is the PREFERRED tool for replacing words or phrases. It automatically fetches the full page,
+     performs the replacement, and saves it back — preserving all other content.
+   - Use this instead of update_confluence_page when you need to replace specific text.
+
+IMPORTANT: When extracting key points, summarizing, or analyzing a FULL page, check the "sections_returned" field
+in the response. If the content seems incomplete or you need to ensure you have EVERYTHING, also call
+get_confluence_page_content to get the full raw content.
 
 WORKFLOW for "apply instructions from page A to page B":
   Step 1: get_page_content_by_sections_tool on page A to READ instructions
@@ -350,10 +411,62 @@ WORKFLOW for "apply instructions from page A to page B":
   Step 3: Analyze both. Decide what exact actions are needed.
   Step 4: Execute all required actions. If instructions say "comment on every occurrence of X", find ALL occurrences in the target page content and call post_confluence_inline_comment ONCE PER OCCURRENCE.
   Step 5: Verify ALL actions are done. Only then write FINAL_ANSWER.
+
+AI-DRIVEN VERIFICATION (important):
+You are responsible for verifying your own work. The system does NOT enforce hard-coded checks.
+After every tool call, you must reason through the following yourself:
+
+1. OCCURRENCE TRACKING: If the task requires commenting on every occurrence of a term,
+   YOU must count the occurrences in the target text and track how many you have commented on.
+   Do not stop until all occurrences are covered.
+
+2. INSTRUCTION COMPLIANCE: If you are applying instructions from one page to another,
+   YOU must read the instructions, derive what actions are required (review, inline comments,
+   footer summary, page edits, etc.), and verify each requirement is met before finishing.
+
+3. GRAMMAR-ONLY vs FULL REVIEW: If the user asks for a grammar-only review, decide on your own
+   whether to limit the review scope. You do not need hard-coded flags — use your judgment
+   based on the user's request.
+
+4. FOOTER STRUCTURE: If the instructions require a footer summary with specific sections
+   (e.g. severity breakdown, readability metrics, overall assessment), YOU must ensure
+   your footer comment includes all required sections. Reason about what is needed from
+   the instruction text — do not rely on a fixed template.
+
+5. READABILITY ANALYSIS: If the instructions ask for readability metrics (Flesch Reading Ease,
+   Flesch-Kincaid Grade Level, etc.), compute or estimate them yourself and include them
+   in your output.
+
+6. COMPLETION CHECK: Before writing FINAL_ANSWER, always ask yourself:
+   - "Have I completed ALL required actions?"
+   - "Are there remaining occurrences, items, or steps I missed?"
+   - "Does my output satisfy every requirement from the instructions?"
+   Only write FINAL_ANSWER when the answer to all three is YES.
+
+CONTEXT-AWARE FLAGGING (critical — avoid false positives):
+When reviewing text and considering whether a term is "context noise," "suspicious," or "out of place":
+
+1. NEVER flag a term based on the word alone. Always read the FULL sentence or paragraph
+   it appears in. A word like "metaphysical" is perfectly valid in philosophy, history,
+   or social science contexts.
+
+2. Before flagging any term, ask yourself:
+   - "Is this term commonly used in the subject area of this document?"
+   - "Does the sentence make sense with this term?"
+   - "Would removing or replacing it improve clarity, or would it lose meaning?"
+   If the term fits the context, do NOT flag it.
+
+3. If user feedback is provided below, treat it as ground truth. If a user previously
+   said a term is NOT noise in a given context, do not flag similar usage again.
+
+4. When you DO flag a term, always explain WHY it seems out of place in that specific
+   context — not just that the word is uncommon.
 """
 
 
-# -- Tool Registry --------------------------------------------------------
+# --- Tool Registry ---
+# This dictionary maps tool names to functions that call them.
+# It allows the agent to use different tools by name.
 
 TOOL_REGISTRY = {
     "review_confluence_page_content": lambda args: mcp_client.call_tool("review_confluence_page_content", args),
@@ -363,131 +476,11 @@ TOOL_REGISTRY = {
     "review_pull_request_tool": lambda args: mcp_client.call_tool("review_pull_request_tool", args),
     "get_confluence_page_content": lambda args: mcp_client.call_tool("get_confluence_page_content", args),
     "update_confluence_page": lambda args: mcp_client.call_tool("update_confluence_page", args),
+    "find_and_replace_in_confluence_page": lambda args: mcp_client.call_tool("find_and_replace_in_confluence_page", args),
 }
 
 
 
-
-def _extract_page_ids_from_link_context(link_context: str) -> list[str]:
-    ids = re.findall(r'page_id\s*=\s*"(\d+)"', link_context)
-    return ids
-
-
-def _get_latest_page_content_observation(scratchpad: list, page_id: str) -> str:
-    for entry in reversed(scratchpad):
-        if entry.get("tool") not in ("get_page_content_by_sections_tool", "get_confluence_page_content"):
-            continue
-        inp = entry.get("input") or {}
-        if str(inp.get("page_id", "")) != str(page_id):
-            continue
-        return str(entry.get("output", ""))
-    return ""
-
-
-def _infer_occurrence_term(instruction_text: str) -> str:
-    patterns = [
-        r"(?:word|term)\s*[\"']([^\"']+)[\"']",
-        r"occurrence(?:s)?\s+of\s+[\"']([^\"']+)[\"']",
-        r"every\s+occurrence\s+of\s+([A-Za-z0-9_-]+)",
-        r"each\s+occurrence\s+of\s+([A-Za-z0-9_-]+)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, instruction_text, flags=re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-    return ""
-
-
-def _count_term_occurrences(text: str, term: str) -> int:
-    if not text or not term:
-        return 0
-    term_escaped = re.escape(term)
-    if re.match(r'^[A-Za-z0-9_]+$', term):
-        pat = rf'\b{term_escaped}\b'
-    else:
-        pat = term_escaped
-    return len(re.findall(pat, text, flags=re.IGNORECASE))
-
-
-def _count_successful_inline_comments_for_term(scratchpad: list, page_id: str, term: str) -> int:
-    count = 0
-    for entry in scratchpad:
-        if entry.get("tool") != "post_confluence_inline_comment":
-            continue
-        inp = entry.get("input") or {}
-        if str(inp.get("page_id", "")) != str(page_id):
-            continue
-        sel = str(inp.get("text_selection", "")).strip().lower()
-        if sel != term.strip().lower():
-            continue
-
-        raw_result = entry.get("raw_result")
-        if isinstance(raw_result, dict) and raw_result.get("success") is True:
-            out_text = str(entry.get("output", "")).lower()
-            if "already exists" in out_text or "duplicate" in out_text:
-                continue
-            count += 1
-    return count
-
-
-
-
-def _count_successful_inline_comments_for_selection(scratchpad: list, page_id: str, text_selection: str) -> int:
-    count = 0
-    for entry in scratchpad:
-        if entry.get("tool") != "post_confluence_inline_comment":
-            continue
-        inp = entry.get("input") or {}
-        if str(inp.get("page_id", "")) != str(page_id):
-            continue
-        sel = str(inp.get("text_selection", "")).strip().lower()
-        if sel != str(text_selection).strip().lower():
-            continue
-        raw_result = entry.get("raw_result")
-        if isinstance(raw_result, dict) and raw_result.get("success") is True:
-            count += 1
-    return count
-
-def _needs_occurrence_completion(user_msg: str, scratchpad: list, link_context: str) -> tuple[bool, str]:
-    page_ids = _extract_page_ids_from_link_context(link_context)
-    if len(page_ids) < 2:
-        return False, ""
-
-    instructions_page_id = page_ids[0]
-    target_page_id = page_ids[1]
-
-    instructions_text = _get_latest_page_content_observation(scratchpad, instructions_page_id)
-    if not instructions_text:
-        return False, ""
-
-    occurrence_signal = bool(re.search(r'each\s+occurrence|every\s+occurrence|all\s+occurrences', instructions_text, re.IGNORECASE))
-    if not occurrence_signal:
-        return False, ""
-
-    term = _infer_occurrence_term(instructions_text)
-    if not term:
-        return False, ""
-
-    target_text = _get_latest_page_content_observation(scratchpad, target_page_id)
-    if not target_text:
-        return False, ""
-
-    expected = _count_term_occurrences(target_text, term)
-    if expected <= 0:
-        return False, ""
-
-    completed = _count_successful_inline_comments_for_term(scratchpad, target_page_id, term)
-    if completed < expected:
-        remaining = expected - completed
-        msg = (
-            f"VERIFICATION BLOCK: Incomplete multi-occurrence task. "
-            f"Instructions require comments for every occurrence of '{term}'. "
-            f"Expected {expected} based on target content, but only {completed} successful inline comment calls were made. "
-            f"Continue with post_confluence_inline_comment for the remaining {remaining} occurrences before FINAL_ANSWER."
-        )
-        return True, msg
-
-    return False, ""
 
 def _build_deterministic_execution_summary(user_msg: str, scratchpad: list) -> str:
     """Build a non-LLM summary based only on actual tool outputs."""
@@ -544,464 +537,6 @@ def _build_deterministic_execution_summary(user_msg: str, scratchpad: list) -> s
     return "\n".join(lines)
 
 
-def _has_success_for_tool(scratchpad: list, tool_name: str) -> bool:
-    for entry in scratchpad:
-        if entry.get("tool") != tool_name:
-            continue
-        raw = entry.get("raw_result")
-        if isinstance(raw, dict) and raw.get("success") is True:
-            return True
-    return False
-
-
-
-
-INSTRUCTION_CONTRACT_CACHE: dict[str, dict] = {}
-
-ALLOWED_CONTRACT_ACTIONS = {
-    "read_instructions",
-    "read_target_page",
-    "run_review",
-    "post_inline_comments",
-    "post_footer_comment",
-    "update_page",
-    "reply_with_summary",
-}
-
-ALLOWED_FOOTER_SECTIONS = {
-    "issue_total",
-    "severity_breakdown",
-    "triggered_categories",
-    "readability_metrics",
-    "overall_assessment",
-    "priority_issues",
-    "citations_status",
-    "accessibility_status",
-    "staleness_status",
-}
-
-CONTRACT_ACTION_TOOL_MAP = {
-    "run_review": ("review_confluence_page_content",),
-    "post_inline_comments": ("post_confluence_inline_comment", "review_confluence_page_content"),
-    "post_footer_comment": ("post_confluence_footer_comment", "review_confluence_page_content"),
-    "update_page": ("update_confluence_page",),
-}
-
-FOOTER_SECTION_CHECKS = {
-    "issue_total": ("issue", "issues found", "total issues"),
-    "severity_breakdown": ("severity", "error", "warning", "info"),
-    "triggered_categories": ("categor", "checklist", "grammar", "structure", "readability"),
-    "readability_metrics": ("flesch", "grade", "reading ease", "readability"),
-    "overall_assessment": ("overall", "excellent", "good", "moderate", "needs improvement", "assessment"),
-    "priority_issues": ("top", "priority", "critical", "1.", "2.", "3."),
-    "citations_status": ("citation", "reference", "source link"),
-    "accessibility_status": ("alt text", "accessibility", "image"),
-    "staleness_status": ("outdated", "stale", "date", "version"),
-}
-
-
-def _is_instruction_apply_request(user_msg: str) -> bool:
-    text = (user_msg or "").lower()
-    has_instruction_source = any(term in text for term in ("instruction", "instructions", "guideline", "guidelines"))
-    has_apply_intent = any(term in text for term in ("apply", "follow", "use", "based on"))
-    return has_instruction_source and has_apply_intent
-
-
-def _extract_json_object(text: str) -> dict | None:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-
-
-def _normalize_instruction_contract(raw_contract: dict | None) -> dict:
-    contract = raw_contract or {}
-    required_actions = []
-    for item in contract.get("required_actions", []):
-        if isinstance(item, str):
-            action = item.strip()
-            if action in ALLOWED_CONTRACT_ACTIONS:
-                required_actions.append({"action": action, "required": True, "details": ""})
-            continue
-        if not isinstance(item, dict):
-            continue
-        action = str(item.get("action", "")).strip()
-        if action not in ALLOWED_CONTRACT_ACTIONS:
-            continue
-        required_actions.append({
-            "action": action,
-            "required": bool(item.get("required", True)),
-            "details": str(item.get("details", "")).strip(),
-        })
-
-    footer = contract.get("footer_requirements", {}) if isinstance(contract.get("footer_requirements", {}), dict) else {}
-    inline = contract.get("inline_requirements", {}) if isinstance(contract.get("inline_requirements", {}), dict) else {}
-    footer_sections = []
-    for section in footer.get("required_sections", []):
-        name = str(section).strip()
-        if name in ALLOWED_FOOTER_SECTIONS and name not in footer_sections:
-            footer_sections.append(name)
-
-    return {
-        "task_type": str(contract.get("task_type", "unknown")).strip() or "unknown",
-        "required_actions": required_actions,
-        "footer_requirements": {
-            "required": bool(footer.get("required", False)),
-            "required_sections": footer_sections,
-            "details": str(footer.get("details", "")).strip(),
-        },
-        "inline_requirements": {
-            "required": bool(inline.get("required", False)),
-            "coverage": str(inline.get("coverage", "unspecified")).strip() or "unspecified",
-            "details": str(inline.get("details", "")).strip(),
-        },
-        "completion_criteria": [str(item).strip() for item in contract.get("completion_criteria", []) if str(item).strip()],
-        "notes": [str(item).strip() for item in contract.get("notes", []) if str(item).strip()],
-    }
-
-
-def _extract_instruction_contract(user_msg: str, instructions_text: str) -> tuple[dict, str | None]:
-    cache_key = hashlib.sha1(f"{user_msg}\n---\n{instructions_text}".encode("utf-8")).hexdigest()
-    cached = INSTRUCTION_CONTRACT_CACHE.get(cache_key)
-    if cached is not None:
-        return cached, None
-
-    prompt = f"""Extract an execution contract from the instruction text below.
-Return JSON only. Do not wrap it in markdown.
-
-Allowed action values:
-- read_instructions
-- read_target_page
-- run_review
-- post_inline_comments
-- post_footer_comment
-- update_page
-- reply_with_summary
-
-Allowed footer section values:
-- issue_total
-- severity_breakdown
-- triggered_categories
-- readability_metrics
-- overall_assessment
-- priority_issues
-- citations_status
-- accessibility_status
-- staleness_status
-
-Return this exact JSON shape:
-{{
-  "task_type": "review|edit|mixed|unknown",
-  "required_actions": [
-    {{"action": "read_instructions", "required": true, "details": "..."}}
-  ],
-  "inline_requirements": {{
-    "required": true,
-    "coverage": "all|some|none|unspecified",
-    "details": "..."
-  }},
-  "footer_requirements": {{
-    "required": true,
-    "required_sections": ["severity_breakdown", "readability_metrics"],
-    "details": "..."
-  }},
-  "completion_criteria": ["..."],
-  "notes": ["..."]
-}}
-
-User request:
-{user_msg}
-
-Instruction text:
-{instructions_text}
-"""
-
-    response, err = call_llm(prompt)
-    if err:
-        return _normalize_instruction_contract(None), err
-
-    parsed = _extract_json_object(response)
-    if parsed is None:
-        return _normalize_instruction_contract(None), "Could not parse instruction contract JSON"
-
-    contract = _normalize_instruction_contract(parsed)
-    INSTRUCTION_CONTRACT_CACHE[cache_key] = contract
-    return contract, None
-
-
-def _has_success_for_tool_on_page(scratchpad: list, tool_name: str, page_id: str) -> bool:
-    for entry in scratchpad:
-        if entry.get("tool") != tool_name:
-            continue
-        raw = entry.get("raw_result")
-        if not (isinstance(raw, dict) and raw.get("success") is True):
-            continue
-        input_data = entry.get("input", {})
-        if isinstance(input_data, dict) and str(input_data.get("page_id", "")) == str(page_id):
-            return True
-    return False
-
-
-def _get_latest_successful_footer_comment_text(scratchpad: list, page_id: str) -> str:
-    for entry in reversed(scratchpad):
-        if entry.get("tool") != "post_confluence_footer_comment":
-            continue
-        raw = entry.get("raw_result")
-        if not (isinstance(raw, dict) and raw.get("success") is True):
-            continue
-        input_data = entry.get("input", {})
-        if isinstance(input_data, dict) and str(input_data.get("page_id", "")) == str(page_id):
-            return str(input_data.get("comment", ""))
-    return ""
-
-
-def _validate_footer_against_contract(scratchpad: list, target_page_id: str, contract: dict) -> list[str]:
-    footer_requirements = contract.get("footer_requirements", {})
-    if not footer_requirements.get("required"):
-        return []
-
-    footer_text = _get_latest_successful_footer_comment_text(scratchpad, target_page_id).lower()
-    if not footer_text:
-        return ["footer comment"]
-
-    missing = []
-    for section_name in footer_requirements.get("required_sections", []):
-        checks = FOOTER_SECTION_CHECKS.get(section_name, ())
-        if not any(token in footer_text for token in checks):
-            missing.append(f"footer section: {section_name}")
-    return missing
-
-
-def _build_instruction_contract_context(user_msg: str, scratchpad: list, link_context: str) -> str:
-    if not _is_instruction_apply_request(user_msg):
-        return ""
-
-    page_ids = _extract_page_ids_from_link_context(link_context)
-    if len(page_ids) < 2:
-        return ""
-
-    instructions_text = _get_latest_page_content_observation(scratchpad, page_ids[0])
-    if not instructions_text:
-        return "\nInstruction contract: not available yet. Fetch the instructions page first.\n"
-
-    contract, err = _extract_instruction_contract(user_msg, instructions_text)
-    if err:
-        return "\nInstruction contract: extraction failed. Read the instructions carefully and satisfy their exact outputs before FINAL_ANSWER.\n"
-
-    return "\nDerived instruction contract that must be satisfied exactly:\n" + json.dumps(contract, indent=2) + "\n"
-
-
-
-def _needs_instruction_compliance(user_msg: str, scratchpad: list, link_context: str) -> tuple[bool, str]:
-    if not _is_instruction_apply_request(user_msg):
-        return False, ""
-
-    page_ids = _extract_page_ids_from_link_context(link_context)
-    if len(page_ids) < 2:
-        return False, ""
-
-    instructions_page_id = page_ids[0]
-    target_page_id = page_ids[1]
-
-    instructions_text = _get_latest_page_content_observation(scratchpad, instructions_page_id)
-    if not instructions_text:
-        return True, "VERIFICATION BLOCK: Instructions were not fetched/read yet. Fetch the instructions page content first."
-
-    target_text = _get_latest_page_content_observation(scratchpad, target_page_id)
-    if not target_text:
-        return True, "VERIFICATION BLOCK: Target page was not fetched/read yet. Fetch the target page content first."
-
-    contract, err = _extract_instruction_contract(user_msg, instructions_text)
-    if err:
-        return True, f"VERIFICATION BLOCK: Could not derive the instruction contract yet ({err}). Continue from the actual instruction text before FINAL_ANSWER."
-
-    missing = []
-    for action in contract.get("required_actions", []):
-        if not action.get("required", True):
-            continue
-        action_name = action.get("action", "")
-        if action_name in ("read_instructions", "read_target_page", "reply_with_summary"):
-            continue
-        tool_names = CONTRACT_ACTION_TOOL_MAP.get(action_name, ())
-        if tool_names and not any(_has_success_for_tool_on_page(scratchpad, tool_name, target_page_id) for tool_name in tool_names):
-            missing.append(action.get("details") or action_name.replace("_", " "))
-
-    missing.extend(_validate_footer_against_contract(scratchpad, target_page_id, contract))
-
-    inline_req = contract.get("inline_requirements", {})
-    if inline_req.get("required") and not any(
-        _has_success_for_tool_on_page(scratchpad, tool_name, target_page_id)
-        for tool_name in CONTRACT_ACTION_TOOL_MAP["post_inline_comments"]
-    ):
-        missing.append("inline comments covering all required issues" if inline_req.get("coverage") == "all" else "inline comments")
-
-    if missing:
-        return True, "VERIFICATION BLOCK: Instruction compliance incomplete. Missing: " + ", ".join(dict.fromkeys(missing))
-
-    return False, ""
-
-
-def _is_grammar_only_request(user_msg: str) -> bool:
-    text = (user_msg or "").lower()
-    has_grammar = "grammar" in text
-    has_review = "review" in text or "check" in text
-    broad_terms = [
-        "readability", "structure", "duplicate", "citation", "table", "all checks", "full review",
-        "everything", "comprehensive", "long sentence", "long paragraph", "repeated word", "context noise"
-    ]
-    asks_broad = any(term in text for term in broad_terms)
-    return has_grammar and has_review and not asks_broad
-
-
-
-
-def _calculate_flesch_reading_ease(text: str) -> float:
-    """Calculate Flesch Reading Ease score. Higher = easier to read (0-100+)."""
-    sentences = len([s for s in text.split('.') if s.strip()])
-    if sentences == 0:
-        return 0.0
-    
-    words = text.split()
-    word_count = len(words)
-    if word_count == 0:
-        return 0.0
-    
-    # Count syllables (rough approximation)
-    def count_syllables(word):
-        word = word.lower()
-        vowels = 'aeiouy'
-        syllable_count = 0
-        previous_was_vowel = False
-        for char in word:
-            is_vowel = char in vowels
-            if is_vowel and not previous_was_vowel:
-                syllable_count += 1
-            previous_was_vowel = is_vowel
-        if word.endswith('e'):
-            syllable_count -= 1
-        if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
-            syllable_count += 1
-        return max(1, syllable_count)
-    
-    syllable_count = sum(count_syllables(w) for w in words)
-    
-    # Flesch Reading Ease formula
-    fre = 206.835 - 1.015 * (word_count / sentences) - 84.6 * (syllable_count / word_count)
-    return max(0, min(100, fre))  # Clamp between 0-100
-
-
-def _calculate_flesch_kincaid_grade(text: str) -> float:
-    """Calculate Flesch-Kincaid Grade Level (US grade)."""
-    sentences = len([s for s in text.split('.') if s.strip()])
-    if sentences == 0:
-        return 0.0
-    
-    words = text.split()
-    word_count = len(words)
-    if word_count == 0:
-        return 0.0
-    
-    # Count syllables (same logic as above)
-    def count_syllables(word):
-        word = word.lower()
-        vowels = 'aeiouy'
-        syllable_count = 0
-        previous_was_vowel = False
-        for char in word:
-            is_vowel = char in vowels
-            if is_vowel and not previous_was_vowel:
-                syllable_count += 1
-            previous_was_vowel = is_vowel
-        if word.endswith('e'):
-            syllable_count -= 1
-        if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
-            syllable_count += 1
-        return max(1, syllable_count)
-    
-    syllable_count = sum(count_syllables(w) for w in words)
-    
-    # Flesch-Kincaid Grade Level formula
-    grade = 0.39 * (word_count / sentences) + 11.8 * (syllable_count / word_count) - 15.59
-    return max(0, grade)
-
-
-def _detect_footer_structure_requirements(instructions_text: str) -> dict:
-    """Detect what structured elements the footer must contain based on instructions."""
-    inst = instructions_text.lower()
-    
-    requirements = {
-        "needs_severity_breakdown": any(k in inst for k in ["severity", "error", "warning", "info", "critical"]),
-        "needs_categories": any(k in inst for k in ["categories", "checklist categories", "triggered"]),
-        "needs_readability_metrics": any(k in inst for k in ["flesch", "readability", "grade level", "reading ease"]),
-        "needs_quality_assessment": any(k in inst for k in ["overall assessment", "quality", "excellent", "good", "moderate", "needs improvement"]),
-        "needs_top_issues": any(k in inst for k in ["top 3", "top 5", "most critical", "priority"]),
-        "is_comprehensive_review": any(k in inst for k in ["footer summary", "footer review", "mandatory", "must", "always"])
-    }
-    
-    return requirements
-
-
-def _extract_footer_requirements_from_instructions(instructions_page_content: str) -> dict:
-    """Extract detailed footer requirements from instructions page."""
-    req = _detect_footer_structure_requirements(instructions_page_content)
-    
-    reqs = {
-        "needs_severity_breakdown": req["needs_severity_breakdown"],
-        "needs_categories": req["needs_categories"],
-        "needs_readability_metrics": req["needs_readability_metrics"],
-        "needs_quality_assessment": req["needs_quality_assessment"],
-        "needs_top_issues": req["needs_top_issues"],
-        "is_mandatory": "mandatory" in instructions_page_content.lower() or "footer summary" in instructions_page_content.lower()
-    }
-    
-    return reqs
-
-
-def _validate_footer_structure(scratchpad: list, target_page_id: str, requirements: dict) -> tuple[bool, list[str]]:
-    """Validate that footer comment contains required structure elements."""
-    missing = []
-    
-    # Find if a footer comment was actually posted for this page
-    footer_results = [
-        r for r in scratchpad 
-        if r.get("tool") == "post_confluence_footer_comment" 
-        and r.get("input", {}).get("page_id") == target_page_id
-        and r.get("raw_result", {}).get("success")
-    ]
-    
-    if not footer_results:
-        if requirements.get("is_mandatory"):
-            missing.append("footer comment not posted")
-        return len(missing) == 0, missing
-    
-    # Get the last successful footer comment text
-    last_footer_result = footer_results[-1]
-    footer_text = last_footer_result.get("input", {}).get("comment", "").lower()
-    
-    # Check for required elements
-    if requirements.get("needs_severity_breakdown") and not any(k in footer_text for k in ["error", "warning", "info", "severity"]):
-        missing.append("severity breakdown")
-    
-    if requirements.get("needs_categories") and not any(k in footer_text for k in ["categor", "check", "grammar", "structure"]):
-        missing.append("categories section")
-    
-    if requirements.get("needs_readability_metrics") and not any(k in footer_text for k in ["flesch", "grade", "readability"]):
-        missing.append("readability metrics (Flesch scores)")
-    
-    if requirements.get("needs_quality_assessment") and not any(k in footer_text for k in ["excellent", "good", "moderate", "needs improvement", "assessment"]):
-        missing.append("quality assessment")
-    
-    if requirements.get("needs_top_issues") and not any(k in footer_text for k in ["top", "critical", "priority", "1.", "2.", "3."]):
-        missing.append("top issues prioritization")
-    
-    return len(missing) == 0, missing
-
-# -- Agent Loop (ReAct + Verify-Then-Continue) ----------------------------
-
 def _build_agent_prompt(
     system_prompt: str,
     link_context: str,
@@ -1033,11 +568,14 @@ def _build_agent_prompt(
             "Only write FINAL_ANSWER when everything is complete."
         )
 
+    # Load user feedback so the AI can learn from past false positives
+    feedback_context = _load_recent_feedback()
+
     return (
         system_prompt + "\n\n"
         + link_context
         + history_context
-        + _build_instruction_contract_context(user_msg, scratchpad, link_context)
+        + feedback_context
         + scratchpad_text
         + f"\nUser request: {user_msg}\n"
         + verification_reminder
@@ -1085,18 +623,6 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
         # --- Check for FINAL_ANSWER ---
         final_match = re.search(r"FINAL_ANSWER:\s*(.+)", response, re.DOTALL)
         if final_match:
-            needs_more, verify_msg = _needs_occurrence_completion(user_msg, scratchpad, link_context)
-            if needs_more:
-                print("[AGENT] Completion gate blocked premature FINAL_ANSWER.", flush=True)
-                scratchpad.append({"tool": "verifier", "input": {}, "output": verify_msg, "raw_result": {"success": False}})
-                continue
-
-            needs_more, verify_msg = _needs_instruction_compliance(user_msg, scratchpad, link_context)
-            if needs_more:
-                print("[AGENT] Instruction compliance gate blocked premature FINAL_ANSWER.", flush=True)
-                scratchpad.append({"tool": "verifier", "input": {}, "output": verify_msg, "raw_result": {"success": False}})
-                continue
-
             final_answer = final_match.group(1).strip()
             print(f"[AGENT] Final answer at step {step + 1}", flush=True)
             return final_answer
@@ -1127,11 +653,6 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             scratchpad.append({"tool": tool_name, "input": args, "output": observation})
             continue
 
-        if tool_name == "review_confluence_page_content" and _is_grammar_only_request(user_msg):
-            # Force grammar-only checklist unless user explicitly provided a checklist page.
-            if not args.get("checklist_page_id"):
-                args["checklist_page_id"] = "__GRAMMAR_ONLY__"
-
         print(f"[AGENT] Calling tool: {tool_name} | args: {json.dumps(args, default=str)[:300]}", flush=True)
 
         # --- Execute tool ---
@@ -1139,7 +660,14 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             # Prevent repeated comments on match_index=0 by auto-advancing match_index.
             page_id = str(args.get("page_id"))
             text_selection = str(args.get("text_selection"))
-            already_done = _count_successful_inline_comments_for_selection(scratchpad, page_id, text_selection)
+            # Count how many successful inline comments were already posted for this selection
+            already_done = sum(
+                1 for entry in scratchpad
+                if entry.get("tool") == "post_confluence_inline_comment"
+                and str(entry.get("input", {}).get("page_id", "")) == page_id
+                and str(entry.get("input", {}).get("text_selection", "")).strip().lower() == text_selection.strip().lower()
+                and isinstance(entry.get("raw_result"), dict) and entry.get("raw_result", {}).get("success") is True
+            )
 
             first_args = dict(args)
             if "match_index" not in first_args:
@@ -1185,7 +713,14 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
                 })
 
             if isinstance(total_occurrences, int):
-                done_now = _count_successful_inline_comments_for_selection(scratchpad, page_id, text_selection)
+                # Count how many successful inline comments have been posted so far
+                done_now = sum(
+                    1 for entry in scratchpad
+                    if entry.get("tool") == "post_confluence_inline_comment"
+                    and str(entry.get("input", {}).get("page_id", "")) == page_id
+                    and str(entry.get("input", {}).get("text_selection", "")).strip().lower() == text_selection.strip().lower()
+                    and isinstance(entry.get("raw_result"), dict) and entry.get("raw_result", {}).get("success") is True
+                )
                 remaining = max(total_occurrences - done_now, 0)
                 scratchpad.append({
                     "tool": "verifier",
@@ -1223,7 +758,8 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
     return "No tool actions were executed before reaching the step limit."
 
 
-# -- Chat Route -----------------------------------------------------------
+# --- Chat API Endpoint ---
+# This endpoint receives chat messages from the frontend, runs the agent, and returns the response.
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -1278,8 +814,43 @@ def chat():
 
     return jsonify({"response": response, "detected": detected if detected else None})
 
+# --- Feedback API Endpoint ---
+# Lets users report false positives (e.g. a term wrongly flagged as context noise).
+# The feedback is stored in a JSON file and loaded into the AI's context on future requests.
+
+@app.route("/api/feedback", methods=["POST"])
+def submit_feedback():
+    data = request.get_json(silent=True) or {}
+    term = data.get("term", "").strip()
+    sentence = data.get("sentence", "").strip()
+    feedback = data.get("feedback", "").strip()  # e.g. "not_noise", "valid_term", "false_positive"
+
+    if not term or not feedback:
+        return jsonify({"error": "Both 'term' and 'feedback' are required."}), 400
+
+    entry = {
+        "term": term,
+        "sentence": sentence,
+        "feedback": feedback,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    try:
+        with open(FEEDBACK_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        return jsonify({"error": f"Could not save feedback: {e}"}), 500
+
+    return jsonify({"status": "ok", "message": f"Feedback recorded for term '{term}'."})
+
+
+# --- Shutdown Handler ---
+# Ensures the MCP client is properly shut down when the server stops.
 
 atexit.register(lambda: mcp_client.shutdown())
+
+# --- Main Entry Point ---
+# Starts the Flask server if this file is run directly.
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

@@ -49,10 +49,44 @@ def create_page(title: str, space_key: str, content: str) -> Dict[str, Any]:
         return {"success": True, "data": response.json()}
     return {"success": False, "error": error or "Failed to create page"}
 
+def _get_current_page_version(page_id: str) -> int | None:
+    """Fetch the current version number of a Confluence page."""
+    try:
+        response, error = confluence_api._request(
+            "GET",
+            f"/rest/api/content/{page_id}",
+            params={"expand": "version"}
+        )
+        if response:
+            return response.json().get("version", {}).get("number")
+    except Exception:
+        pass
+    return None
+
+
 def update_page(page_id: str, title: str, content: str, version: int, message: str) -> Dict[str, Any]:
-    response, error = confluence_api.update_page(page_id, title, content, version, message)
-    if response:
-        return {"success": True, "data": response.json()}
+    """Update a Confluence page, with auto-retry on 409 Conflict (version mismatch)."""
+    max_retries = 3
+    current_version = version
+    error: str | None = None
+
+    for attempt in range(max_retries):
+        response, error = confluence_api.update_page(page_id, title, content, current_version, message)
+        if response:
+            return {"success": True, "data": response.json()}
+
+        # Check if the error is a 409 Conflict (version mismatch)
+        if error and "409" in str(error):
+            latest_version = _get_current_page_version(page_id)
+            if latest_version and latest_version != current_version:
+                current_version = latest_version
+                continue  # Retry with the latest version
+            # If we can't get a new version, stop retrying
+            break
+        else:
+            # Non-conflict error, don't retry
+            break
+
     return {"success": False, "error": error or "Failed to update page"}
 
 def get_page_content(page_id: str) -> Dict[str, Any]:
@@ -61,7 +95,78 @@ def get_page_content(page_id: str) -> Dict[str, Any]:
         return {"success": True, "data": text}
     return {"success": False, "error": error or "Failed to get page content"}
 
-def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_sections: int = 5) -> Dict[str, Any]:
+
+def find_and_replace_in_page(page_id: str, find_text: str, replace_text: str, replace_all: bool = True) -> Dict[str, Any]:
+    """Safely find and replace text in a Confluence page without losing any content.
+
+    This fetches the full page, performs the replacement, and saves it back.
+    It handles version conflicts automatically.
+    """
+    import re as _re
+
+    if not page_id or not find_text:
+        return {"success": False, "error": "page_id and find_text are required"}
+
+    # Step 1: Fetch full page metadata (title, version, storage body)
+    response, error = confluence_api._request(
+        "GET",
+        f"/rest/api/content/{page_id}",
+        params={"expand": "body.storage,version"}
+    )
+    if error or response is None:
+        return {"success": False, "error": error or "Failed to fetch page"}
+
+    page_data = response.json()
+    title = page_data.get("title", "")
+    version = page_data.get("version", {}).get("number", 0)
+    storage_body = page_data.get("body", {}).get("storage", {}).get("value", "")
+
+    if not storage_body:
+        return {"success": False, "error": "Page has no content body"}
+
+    # Step 2: Count occurrences (search in visible text, but replace in storage format)
+    # Try plain text replacement first
+    if find_text in storage_body:
+        if replace_all:
+            new_body = storage_body.replace(find_text, replace_text)
+            count = storage_body.count(find_text)
+        else:
+            new_body = storage_body.replace(find_text, replace_text, 1)
+            count = 1
+    else:
+        # Try case-insensitive replacement
+        pattern = _re.compile(_re.escape(find_text), _re.IGNORECASE)
+        matches = pattern.findall(storage_body)
+        if not matches:
+            return {
+                "success": False,
+                "error": f"Text '{find_text}' not found on the page."
+            }
+        if replace_all:
+            new_body = pattern.sub(replace_text, storage_body)
+            count = len(matches)
+        else:
+            new_body = pattern.sub(replace_text, storage_body, count=1)
+            count = 1
+
+    if new_body == storage_body:
+        return {"success": True, "data": {"message": "No changes needed — text already matches.", "replacements": 0}}
+
+    # Step 3: Update the page with the full modified content
+    result = update_page(page_id, title, new_body, version, f"Replaced '{find_text}' with '{replace_text}'")
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "data": {
+                "message": f"Successfully replaced '{find_text}' with '{replace_text}'.",
+                "replacements": count,
+                "page_id": page_id,
+            }
+        }
+    return result
+
+def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_sections: int = 50) -> Dict[str, Any]:
     text, error = syntax_actions.get_page_content_by_sections(page_id, chunk_size, max_sections)
     if text is not None:
         return {"success": True, "data": text}

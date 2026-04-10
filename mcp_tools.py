@@ -6,6 +6,7 @@ from mcp_calls import (
     create_space,
     create_page,
     update_page,
+    find_and_replace_in_page,
     get_page_content,
     get_page_content_by_sections,
     review_confluence_page,
@@ -94,6 +95,32 @@ def update_confluence_page(page_id: str, title: str, content: str, version: int,
 
 @mcp.tool(
     description="""
+Safely find and replace text in a Confluence page WITHOUT losing any existing content.
+
+This is the PREFERRED tool for text replacements. It automatically:
+- Fetches the full page content
+- Performs the find/replace
+- Saves the complete page back (preserving all other content)
+- Handles version conflicts
+
+Use this instead of update_confluence_page when you need to replace specific text.
+
+Args:
+ - page_id (str): The ID of the page.
+ - find_text (str): The exact text to find.
+ - replace_text (str): The text to replace it with.
+ - replace_all (bool, optional): If True (default), replaces ALL occurrences. If False, replaces only the first.
+
+Returns:
+ - dict: {"success": True, "data": {"message": "...", "replacements": N}} if successful
+         {"success": False, "error": "error message"} if it fails
+"""
+)
+def find_and_replace_in_confluence_page(page_id: str, find_text: str, replace_text: str, replace_all: bool = True):
+    return find_and_replace_in_page(page_id, find_text, replace_text, replace_all)
+
+@mcp.tool(
+    description="""
 Retrieve the content of a Confluence page by sections for easier reading of Co-pilot for reviews
 
 Args:
@@ -104,7 +131,7 @@ Returns:
          {"success": False, "error": "error message"} if retrieval fails
 """
 )
-def get_page_content_by_sections_tool(page_id: str, chunk_size: int = 2500, max_sections: int = 5):
+def get_page_content_by_sections_tool(page_id: str, chunk_size: int = 2500, max_sections: int = 50):
     return get_page_content_by_sections(page_id, chunk_size, max_sections)
 
 @mcp.tool(
