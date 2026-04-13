@@ -37,6 +37,15 @@ FEEDBACK_FILE = os.path.join(os.path.dirname(__file__), "feedback_log.json")
 MAX_AGENT_STEPS = 20  # Raised — acts as safety net, not a kill switch
 
 
+def _step_budget_for_request(user_msg: str) -> int:
+    """Return a smaller step budget for lightweight requests to reduce latency."""
+    text = (user_msg or "").lower()
+    fast_keywords = ["spell", "spelling", "grammar", "typo", "inline comment"]
+    if any(keyword in text for keyword in fast_keywords):
+        return min(8, MAX_AGENT_STEPS)
+    return MAX_AGENT_STEPS
+
+
 
 # --- MCP Client Class ---
 # This class manages communication with the FastMCP server (an external tool).
@@ -45,12 +54,14 @@ class MCPClient:
     """Communicates with the FastMCP server over stdio using JSON-RPC."""
 
     def __init__(self):
+        """Initializes the MCP client with no active process or state."""
         self.process: subprocess.Popen[bytes] | None = None
         self.lock = threading.Lock()
         self._request_id = 0
         self._initialized = False
 
     def _ensure_started(self):
+        """Starts the MCP server process if not running and performs protocol initialization."""
         if self.process is None or self.process.poll() is not None:
             env = {
                 **os.environ,
@@ -80,16 +91,19 @@ class MCPClient:
             self._initialized = True
 
     def _next_id(self):
+        """Returns the next unique auto-incremented request ID."""
         self._request_id += 1
         return self._request_id
 
     def _send_request(self, method, params, timeout=None):
+        """Sends a JSON-RPC request to the MCP server and returns the response."""
         msg = {"jsonrpc": "2.0", "id": self._next_id(), "method": method, "params": params}
         if timeout is None:
             return self._send_and_receive(msg)
         return self._send_and_receive(msg, timeout=timeout)
 
     def _send_notification(self, method, params):
+        """Sends a one-way JSON-RPC notification to the MCP server (no response expected)."""
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         raw = json.dumps(msg) + "\n"
         proc = self.process
@@ -99,6 +113,7 @@ class MCPClient:
         proc.stdin.flush()
 
     def _send_and_receive(self, msg, timeout=120):
+        """Writes a JSON-RPC message to the MCP process stdin and waits for the matching response."""
         proc = self.process
         if proc is None or proc.stdin is None or proc.stdout is None:
             raise RuntimeError("MCP server not started")
@@ -114,6 +129,7 @@ class MCPClient:
         result_queue: Queue = Queue()
 
         def _reader():
+            """Reads lines from the MCP server stdout until a JSON-RPC response with a matching ID is found."""
             try:
                 stdout = proc.stdout
                 if stdout is None:
@@ -169,6 +185,7 @@ class MCPClient:
         return result
 
     def call_tool(self, tool_name, arguments):
+        """Calls a named tool on the MCP server and returns the parsed result."""
         with self.lock:
             try:
                 print(f"[MCP] call_tool: {tool_name}", flush=True)
@@ -190,12 +207,14 @@ class MCPClient:
                 return {"success": False, "error": str(e)}
 
     def list_tools(self):
+        """Retrieves the list of available tools from the MCP server."""
         with self.lock:
             self._ensure_started()
             result = self._send_request("tools/list", {})
             return result.get("result", {}).get("tools", [])
 
     def shutdown(self):
+        """Gracefully closes the MCP server process."""
         proc = self.process
         if proc is not None and proc.poll() is None:
             try:
@@ -214,10 +233,26 @@ mcp_client = MCPClient()
 def call_llm(prompt: str) -> tuple[str, str | None]:
     """Send a prompt to the LLM (Copilot) and return (response, error)."""
     try:
-        resp = requests.post(COPILOT_BRIDGE_URL, json={"prompt": prompt}, timeout=180)
+        resp = requests.post(COPILOT_BRIDGE_URL, json={"prompt": prompt}, timeout=90)
         data = resp.json()
         if "error" in data:
             return "", f"Bridge error: {data['error']}"
+
+        model = data.get("model")
+        family = data.get("family")
+        profile = data.get("profile")
+        latency_ms = data.get("latency_ms")
+        if model or family or profile or latency_ms is not None:
+            print(
+                "[LLM] model={} family={} profile={} latency_ms={}".format(
+                    model or "unknown",
+                    family or "unknown",
+                    profile or "unknown",
+                    latency_ms if latency_ms is not None else "unknown",
+                ),
+                flush=True,
+            )
+
         return data.get("response", ""), None
     except requests.ConnectionError:
         return "", "Cannot reach Copilot Bridge. Make sure VS Code is running with the bridge extension active."
@@ -231,11 +266,13 @@ def call_llm(prompt: str) -> tuple[str, str | None]:
 # These functions help extract information from user input, such as Confluence page IDs or GitHub PR info.
 
 def extract_confluence_page_id(url: str) -> str | None:
+    """Extracts a numeric Confluence page ID from a URL string."""
     m = re.search(r"/pages/(\d+)", url)
     return m.group(1) if m else None
 
 
 def extract_pr_info(url: str) -> dict | None:
+    """Parses a GitHub pull request URL and returns the owner, repo, and PR number."""
     m = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
     if m:
         return {"owner": m.group(1), "repo": m.group(2), "pr_number": int(m.group(3))}
@@ -243,6 +280,7 @@ def extract_pr_info(url: str) -> dict | None:
 
 
 def _extract_confluence_page_ids_from_text(text: str) -> list[str]:
+    """Scans text for Atlassian Confluence URLs and returns a list of unique page IDs."""
     ids: list[str] = []
     if not text:
         return ids
@@ -255,6 +293,7 @@ def _extract_confluence_page_ids_from_text(text: str) -> list[str]:
 
 
 def _extract_prs_from_text(text: str) -> list[dict]:
+    """Scans text for GitHub pull request URLs and returns a list of PR info dicts."""
     found: list[dict] = []
     if not text:
         return found
@@ -306,7 +345,122 @@ def _load_recent_feedback(limit: int = 20) -> str:
         return ""
 
 
+def _recent_user_text(history: list, limit: int = 6) -> str:
+    """Return recent user-authored messages combined into one string."""
+    if not history:
+        return ""
+    texts: list[str] = []
+    for entry in history[-limit:]:
+        if entry.get("role") != "user":
+            continue
+        text = str(entry.get("text", "")).strip()
+        if text:
+            texts.append(text)
+    return "\n".join(texts)
+
+
+def _flatten_tool_text(value) -> str:
+    """Convert nested tool output into plain text for lightweight checks."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_flatten_tool_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        parts = [_flatten_tool_text(item) for item in value.values()]
+        return "\n".join(part for part in parts if part)
+    return str(value)
+
+
+def _is_simple_spelling_instruction_text(text: str) -> bool:
+    """Check whether an instruction page only asks for spelling-style inline comments."""
+    lowered = (text or "").lower()
+    has_spelling = any(token in lowered for token in ["wrong spelling", "spelling", "misspell", "typo", "grammar"])
+    has_inline = any(token in lowered for token in ["inline comment", "inline comments", "comment on"])
+    has_complex_requirements = any(
+        token in lowered
+        for token in [
+            "footer",
+            "summary",
+            "readability",
+            "long sentence",
+            "long paragraph",
+            "statistics",
+            "replace the text",
+            "update the page",
+            "find and replace",
+        ]
+    )
+    return has_spelling and has_inline and not has_complex_requirements
+
+
+def _build_fast_review_response(target_page_id: str, elapsed_ms: int) -> str:
+    """Return a concise user-facing success message for the fast review path."""
+    elapsed_seconds = elapsed_ms / 1000
+    return (
+        f"Used the fast spelling-review path for Confluence page {target_page_id}. "
+        f"Completed in about {elapsed_seconds:.1f}s and posted the grammar/spelling findings directly to the page."
+    )
+
+
+def _try_fast_confluence_spelling_review(user_msg: str, history: list, page_ids: list[str]) -> str | None:
+    """Bypass the agent loop for short spelling-only Confluence tasks."""
+    if not page_ids:
+        return None
+
+    recent_text = _recent_user_text(history)
+    combined = f"{recent_text}\n{user_msg}".lower()
+    mentions_follow_apply = "follow" in combined and "apply" in combined
+    mentions_spelling = any(token in combined for token in ["spell", "spelling", "misspell", "typo", "grammar"])
+    if not mentions_spelling and not (mentions_follow_apply and len(page_ids) >= 2):
+        return None
+
+    instruction_page_id = page_ids[0] if len(page_ids) >= 2 else None
+    target_page_id = page_ids[-1]
+
+    if instruction_page_id:
+        instructions_result = TOOL_REGISTRY["get_page_content_by_sections_tool"]({
+            "page_id": instruction_page_id,
+            "chunk_size": 2000,
+            "max_sections": 4,
+        })
+        if not isinstance(instructions_result, dict) or not instructions_result.get("success"):
+            return None
+        instructions_text = _flatten_tool_text(instructions_result.get("data", ""))
+        if not _is_simple_spelling_instruction_text(instructions_text):
+            return None
+
+    target_result = TOOL_REGISTRY["get_page_content_by_sections_tool"]({
+        "page_id": target_page_id,
+        "chunk_size": 2000,
+        "max_sections": 4,
+    })
+    if not isinstance(target_result, dict) or not target_result.get("success"):
+        return None
+
+    target_text = _flatten_tool_text(target_result.get("data", ""))
+    if len(target_text.strip()) > 4000:
+        return None
+
+    started_at = time.time()
+    review_result = TOOL_REGISTRY["review_confluence_page_content"]({
+        "page_id": target_page_id,
+        "checklist_page_id": "__GRAMMAR_ONLY__",
+    })
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    if not isinstance(review_result, dict) or not review_result.get("success"):
+        return None
+
+    print(f"[FAST_PATH] Used direct grammar review for page {target_page_id} in {elapsed_ms} ms", flush=True)
+    return _build_fast_review_response(target_page_id, elapsed_ms)
+
+
 def format_result(data) -> str:
+    """Returns the data as a string, pretty-printing dicts/lists as formatted JSON."""
     if isinstance(data, str):
         return data
     return json.dumps(data, indent=2, default=str)
@@ -317,6 +471,7 @@ def format_result(data) -> str:
 @app.route("/")
 def index():
     # Renders the main web page (index.html)
+    """Renders and returns the main index.html page."""
     return render_template("index.html")
 
 
@@ -599,8 +754,10 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             parts.append(f"{role}: {entry.get('text', '')}")
         history_context = "Conversation history:\n" + "\n".join(parts) + "\n\n"
 
-    for step in range(MAX_AGENT_STEPS):
-        print(f"[AGENT] Step {step + 1}/{MAX_AGENT_STEPS}", flush=True)
+    step_budget = _step_budget_for_request(user_msg)
+
+    for step in range(step_budget):
+        print(f"[AGENT] Step {step + 1}/{step_budget}", flush=True)
 
         prompt = _build_agent_prompt(
             AGENT_SYSTEM_PROMPT,
@@ -750,7 +907,7 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             "raw_result": result,
         })
     # --- MAX_STEPS reached: return deterministic execution report ---
-    print(f"[AGENT] Max steps ({MAX_AGENT_STEPS}) reached. Returning deterministic execution summary.", flush=True)
+    print(f"[AGENT] Max steps ({step_budget}) reached. Returning deterministic execution summary.", flush=True)
 
     if scratchpad:
         return _build_deterministic_execution_summary(user_msg, scratchpad)
@@ -763,6 +920,7 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
+    """POST /api/chat - extracts links from the user prompt, runs the agent loop, and returns the response."""
     data = request.get_json(silent=True) or {}
     user_msg = data.get("prompt", "").strip()
     history = data.get("history", [])
@@ -805,6 +963,14 @@ def chat():
             link_context += f"  PR: {owner}/{repo}#{pr_num}\n"
         link_context += "\n"
 
+    # Try direct fast path for lightweight Confluence spelling tasks.
+    try:
+        fast_response = _try_fast_confluence_spelling_review(user_msg, history, page_ids)
+        if fast_response:
+            return jsonify({"response": fast_response, "detected": detected if detected else None, "mode": "fast_path"})
+    except Exception as e:
+        print(f"[FAST_PATH] Failed and falling back to agent: {e}", flush=True)
+
     # Run the agent loop
     try:
         response = run_agent(user_msg, history, link_context)
@@ -820,6 +986,7 @@ def chat():
 
 @app.route("/api/feedback", methods=["POST"])
 def submit_feedback():
+    """POST /api/feedback - records user feedback about a flagged term to the feedback log file."""
     data = request.get_json(silent=True) or {}
     term = data.get("term", "").strip()
     sentence = data.get("sentence", "").strip()

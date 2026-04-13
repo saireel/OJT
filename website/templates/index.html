@@ -22,7 +22,7 @@
         </div>
         <div class="sidebar-section">
             <h3>Quick Tips</h3>
-            <div class="sidebar-item" style="flex-direction:column;align-items:flex-start;gap:4px;font-size:0.8rem;color:#777;">
+            <div class="sidebar-item sidebar-note">
                 <span>Paste a Confluence or GitHub link to get started</span>
                 <span>Use Ctrl+Enter to send</span>
             </div>
@@ -40,6 +40,7 @@
                 <textarea id="input" placeholder="Paste a link or type a prompt... (Ctrl+Enter to send)" rows="1"></textarea>
                 <button class="send-btn" id="send">Send</button>
             </div>
+            <div class="request-hint" id="request-hint">Live progress is shown while MunnAI works through your request.</div>
         </div>
     </div>
 <script>
@@ -47,66 +48,185 @@ const chat = document.getElementById("chat");
 const chatScroll = document.getElementById("chat-scroll");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
+const requestHint = document.getElementById("request-hint");
 const conversationHistory = [];
+const WAIT_STAGES = [
+    {
+        after: 0,
+        title: "Preparing request",
+        detail: "Sending your prompt and preparing the request context.",
+        stream: "On it! Getting your request ready..."
+    },
+    {
+        after: 1600,
+        title: "Gathering context",
+        detail: "Gathering the relevant pages, files, and conversation context.",
+        stream: "Let me take a look at what you need..."
+    },
+    {
+        after: 5200,
+        title: "Working",
+        detail: "Working through the task and preparing the next actions.",
+        stream: "Working through this step by step..."
+    },
+    {
+        after: 11000,
+        title: "Finalizing",
+        detail: "Finalizing tool results and assembling the response.",
+        stream: "Almost there, putting it all together for you..."
+    }
+];
 
 function esc(text) {
     const d = document.createElement("div");
     d.textContent = text;
     return d.innerHTML;
 }
+
+function formatClock(date = new Date()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatElapsed(ms) {
+    const seconds = Math.max(1, Math.floor(ms / 1000));
+    if (seconds < 60) {
+        return `${seconds}s`;
+    }
+    const mins = Math.floor(seconds / 60);
+    const rem = seconds % 60;
+    return `${mins}m ${rem}s`;
+}
+
+function getStage(elapsedMs) {
+    let active = WAIT_STAGES[0];
+    let index = 0;
+    for (let i = 0; i < WAIT_STAGES.length; i += 1) {
+        if (elapsedMs >= WAIT_STAGES[i].after) {
+            active = WAIT_STAGES[i];
+            index = i;
+        }
+    }
+    return { ...active, index };
+}
+
+function getProgressPercent(elapsedMs) {
+    const seconds = elapsedMs / 1000;
+    if (seconds < 2) return 16 + seconds * 10;
+    if (seconds < 6) return 36 + (seconds - 2) * 8;
+    if (seconds < 12) return 68 + (seconds - 6) * 3.2;
+    if (seconds < 25) return 87 + (seconds - 12) * 0.35;
+    return 92;
+}
+
+function formatBotText(text) {
+    let safe = esc(text);
+    safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    safe = safe.replace(/^### (.+)$/gm, '<strong style="font-size:15px;">$1</strong>');
+    safe = safe.replace(/^## (.+)$/gm, '<strong style="font-size:16px;">$1</strong>');
+    safe = safe.replace(/^  - /gm, "  - ");
+    safe = safe.replace(/^- /gm, "- ");
+    return safe;
+}
+
 function addMsg(role, text, badges, isStatus) {
     const div = document.createElement("div");
     div.className = "msg " + role;
     let badgeHtml = "";
     if (badges && badges.length) {
-        badgeHtml = '<div style="margin-bottom:6px">' +
-            badges.map(b => `<span class="detected-badge">${esc(b)}</span>`).join("") +
+        badgeHtml = '<div class="badge-row">' +
+            badges.map((badge) => `<span class="detected-badge">${esc(badge)}</span>`).join("") +
             "</div>";
     }
-    // Add time
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
-        <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
+    const timeStr = formatClock();
+    const bodyClass = isStatus ? "msg-body status-text" : "msg-body";
+    div.innerHTML = `<div class="msg-inner">
+        <div class="msg-time">${timeStr}</div>
         ${badgeHtml}
-        <div${isStatus ? ' style="display:flex;align-items:center;font-size:16px;"' : ''} style="white-space:pre-wrap;word-wrap:break-word;">${role === 'user' ? esc(text) : formatBotText(text)}</div>
+        <div class="${bodyClass}">${role === "user" ? esc(text) : formatBotText(text)}</div>
     </div>`;
     chat.appendChild(div);
     chatScroll.scrollTop = chatScroll.scrollHeight;
     return div;
 }
 
-function formatBotText(text) {
-    // Escape HTML first
-    let safe = esc(text);
-    // Bold: **text**
-    safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Headers: ### text
-    safe = safe.replace(/^### (.+)$/gm, '<strong style="font-size:15px;">$1</strong>');
-    safe = safe.replace(/^## (.+)$/gm, '<strong style="font-size:16px;">$1</strong>');
-    // Bullet points
-    safe = safe.replace(/^  - /gm, '  • ');
-    safe = safe.replace(/^- /gm, '• ');
-    return safe;
-}
-
 function addLoading() {
     const div = document.createElement("div");
     div.className = "msg bot";
     div.id = "loader";
-    div.innerHTML = `<div class="msg-inner loading">Thinking</div>`;
+    div.innerHTML = `<div class="msg-inner loading-card">
+        <div class="loading-header">
+            <div class="loading-title">Preparing request</div>
+            <div class="loading-elapsed">1s</div>
+        </div>
+        <div class="loading-stream"><span class="loading-stream-text"></span><span class="loading-cursor">|</span></div>
+        <div class="loading-progress-track">
+            <div class="loading-progress-bar"></div>
+        </div>
+    </div>`;
     chat.appendChild(div);
     chatScroll.scrollTop = chatScroll.scrollHeight;
-    return div;
+
+    const startedAt = Date.now();
+    const titleNode = div.querySelector(".loading-title");
+    const elapsedNode = div.querySelector(".loading-elapsed");
+    const progressNode = div.querySelector(".loading-progress-bar");
+    const streamTextNode = div.querySelector(".loading-stream-text");
+    let currentStageIdx = -1;
+    let typeTimer = null;
+    let charIdx = 0;
+
+    function typeStream(text) {
+        if (typeTimer) clearInterval(typeTimer);
+        streamTextNode.textContent = "";
+        charIdx = 0;
+        typeTimer = setInterval(() => {
+            if (charIdx < text.length) {
+                streamTextNode.textContent += text[charIdx];
+                charIdx++;
+            } else {
+                clearInterval(typeTimer);
+                typeTimer = null;
+            }
+        }, 28);
+    }
+
+    const update = () => {
+        const elapsedMs = Date.now() - startedAt;
+        const stage = getStage(elapsedMs);
+        titleNode.textContent = stage.title;
+        elapsedNode.textContent = formatElapsed(elapsedMs);
+        progressNode.style.width = `${Math.min(96, getProgressPercent(elapsedMs))}%`;
+        const newStageIdx = WAIT_STAGES.indexOf(stage);
+        if (newStageIdx !== currentStageIdx) {
+            currentStageIdx = newStageIdx;
+            typeStream(stage.stream);
+        }
+    };
+
+    update();
+    const intervalId = window.setInterval(update, 250);
+
+    return {
+        remove() {
+            window.clearInterval(intervalId);
+            if (typeTimer) clearInterval(typeTimer);
+            div.remove();
+        }
+    };
 }
+
 async function send() {
     const text = input.value.trim();
     if (!text) return;
+
     input.value = "";
     input.style.height = "44px";
     addMsg("user", text);
-    conversationHistory.push({ role: "user", text: text });
+    conversationHistory.push({ role: "user", text });
+
     sendBtn.disabled = true;
+    sendBtn.textContent = "Working...";
+    requestHint.textContent = "Live status updates are shown in the active response card.";
     const loader = addLoading();
 
     try {
@@ -118,78 +238,43 @@ async function send() {
         const data = await res.json();
         loader.remove();
 
-        // Show detected links (informational only)
-
-        // Show error or response
         if (data.error) {
-            if (data.detected && data.detected.length) {
-                addMsg("bot", "❌ " + data.error, null, true);
-            } else {
-                addMsg("bot", "❌ " + data.error);
-            }
+            addMsg("bot", `Error: ${data.error}`, data.detected || null, true);
         } else if (data.response) {
-            const isRefusal = /can't assist|cannot assist|unable to help|i'm sorry|i am sorry/i.test(data.response);
-            addMsg("bot", data.response, data.detected);
+            addMsg("bot", data.response, data.detected || null);
             conversationHistory.push({ role: "bot", text: data.response });
-            if (data.detected && data.detected.length && !isRefusal) {
-                addMsg("bot", "✅ Task completed successfully", null, true);
+            if (data.mode === "fast_path") {
+                addMsg("bot", "Used the fast review path for this request.", null, true);
+            } else if (data.detected && data.detected.length) {
+                addMsg("bot", "Task completed successfully.", null, true);
             }
         } else {
-            addMsg("bot", "No response");
+            addMsg("bot", "No response returned.", null, true);
         }
     } catch (e) {
         loader.remove();
-        addMsg("bot", "❌ Error: " + e.message, null, true);
+        addMsg("bot", `Error: ${e.message}`, null, true);
     }
+
     sendBtn.disabled = false;
+    sendBtn.textContent = "Send";
+    requestHint.textContent = "Live progress is shown while MunnAI works through your request.";
     input.focus();
 }
 
 sendBtn.addEventListener("click", send);
-input.addEventListener("keydown", e => {
-    if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); send(); }
+input.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && e.key === "Enter") {
+        e.preventDefault();
+        send();
+    }
 });
 input.addEventListener("input", () => {
     input.style.height = "44px";
     input.style.height = Math.min(input.scrollHeight, 150) + "px";
 });
 
-function typeMsg(role, text, badges, isStatus, delay=30) {
-    const div = document.createElement("div");
-    div.className = "msg " + role;
-    let badgeHtml = "";
-    if (badges && badges.length) {
-        badgeHtml = '<div style="margin-bottom:6px">' +
-            badges.map(b => `<span class="detected-badge">${esc(b)}</span>`).join("") +
-            "</div>";
-    }
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
-        <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
-        ${badgeHtml}
-        <div id="typewriter"></div>
-    </div>`;
-    chat.appendChild(div);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
-
-    // Typewriter effect
-    const target = div.querySelector("#typewriter");
-    let i = 0;
-    function type() {
-        if (i <= text.length) {
-            target.innerHTML = esc(text.slice(0, i));
-            chatScroll.scrollTop = chatScroll.scrollHeight;
-            i++;
-            setTimeout(type, delay);
-        }
-    }
-    type();
-    return div;
-}
-
-typeMsg("bot", "Hi! I am MunnAI, how may I help you today?");
-
+addMsg("bot", "Hi! I am MunnAI, how may I help you today?");
 </script>
 </body>
 </html>
