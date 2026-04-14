@@ -9,7 +9,10 @@
       "env": {
         "ENABLE_READABILITY_CHECK": "true",
         "READABILITY_SENTENCE_WORD_LIMIT": "40",
-        "READABILITY_PARAGRAPH_WORD_LIMIT": "250"
+        "READABILITY_PARAGRAPH_WORD_LIMIT": "250",
+        "ENFORCE_REVIEW_SUMMARY": "true",
+        "ALWAYS_INCLUDE_FOOTER_SUMMARY": "true",
+        "INCLUDE_SUMMARY_IN_RESPONSE": "true"
       }
     }
   },

@@ -6,7 +6,7 @@ import re
 from typing import Any, Dict, List
 
 from confluence_reviewer import confluence_api, ReviewActions, SyntaxActions
-from github_reviewer.github_functions import github_api
+from github_reviewer import github_api
 
 # Shared instances (created once, reused across all calls)
 syntax_actions = SyntaxActions(confluence_api)
@@ -172,7 +172,7 @@ def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_secti
         return {"success": True, "data": text}
     return {"success": False, "error": error or "Failed to get page content"}
 
-def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "") -> Dict[str, Any]:
+def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False) -> Dict[str, Any]:
     source = page_input or page_id
     page_ids = _extract_confluence_page_ids(source)
     if not page_ids:
@@ -182,7 +182,7 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
         }
 
     if len(page_ids) == 1:
-        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id)
+        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer)
         if result is not None:
             return {"success": True, "data": result}
         return {"success": False, "error": error or "Failed to review confluence page"}
@@ -190,7 +190,7 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
     reviewed = []
     failed = []
     for pid in page_ids:
-        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id)
+        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer)
         if result is not None:
             reviewed.append(result)
         else:
@@ -316,10 +316,13 @@ def reply_comment(repo: str, pr_number: int, comment_id: int, reply_text: str):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def review_pull_request(repo: str, pr_number: int, checklist: list):
+def review_pull_request(repo: str, pr_number: int, checklist: list, skip_inline: bool = False, skip_footer: bool = False):
     try:
-        result = github_api.review_pull_request(repo, pr_number, checklist)
-        return {"success": True, "data": result}
+        result = github_api.review_pull_request(repo, pr_number, checklist, skip_inline=skip_inline, skip_footer=skip_footer)
+        # Ensure summary is always included in response
+        if result and isinstance(result, dict):
+            return {"success": True, "data": result}
+        return {"success": True, "data": {"summary": "Review completed", "result": result}}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

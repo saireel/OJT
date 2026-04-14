@@ -9,6 +9,11 @@ from typing import Any, Dict, Optional, Tuple
 import config
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+_stderr_handler = logging.StreamHandler()
+_stderr_handler.setLevel(logging.INFO)
+_stderr_handler.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_stderr_handler)
 
 class ReviewActions:
     """Review orchestration, checks, and evaluation logic."""
@@ -1359,7 +1364,7 @@ class ReviewActions:
 
         return "".join(sections)
 
-    def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Run the full page review workflow using the configured checklist source."""
         logger.info("[REVIEW] === Starting review for page_id=%s checklist_page_id=%s ===", page_id, checklist_page_id or "(default)")
         if not page_id:
@@ -1457,30 +1462,38 @@ class ReviewActions:
         # --- Phase 2: Post footer FIRST (single API call, before rate limits hit) ---
         logger.info("[REVIEW] Building footer summary (%d issues found, %d deferred inline comments)", len(state["issues"]), len(state["_deferred_inlines"]))
         footer_comment = self._build_footer_review_comment(state)
+        state["footer_summary"] = footer_comment  # Store for response
         footer_response, footer_error = None, None
-        for attempt in range(3):
-            delay = 2 * (attempt + 1)
-            logger.info("[REVIEW] Footer post attempt %d/3 (delay=%ds)", attempt + 1, delay)
-            time.sleep(delay)
-            footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
-            if footer_response is not None and not footer_error:
-                logger.info("[REVIEW] Footer posted successfully on attempt %d", attempt + 1)
-                break
-            logger.warning("[REVIEW] Footer post failed on attempt %d: %s", attempt + 1, footer_error)
-        footer_posted = footer_response is not None and not footer_error
+        if skip_footer:
+            logger.info("[REVIEW] Skipping footer post (skip_footer=True)")
+            footer_posted = False
+        else:
+            for attempt in range(3):
+                delay = 2 * (attempt + 1)
+                logger.info("[REVIEW] Footer post attempt %d/3 (delay=%ds)", attempt + 1, delay)
+                time.sleep(delay)
+                footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
+                if footer_response is not None and not footer_error:
+                    logger.info("[REVIEW] Footer posted successfully on attempt %d", attempt + 1)
+                    break
+                logger.warning("[REVIEW] Footer post failed on attempt %d: %s", attempt + 1, footer_error)
+            footer_posted = footer_response is not None and not footer_error
 
         # --- Phase 3: Now post deferred inline comments ---
         state["_defer_inline"] = False
         deferred = state.pop("_deferred_inlines", [])
-        logger.info("[REVIEW] Posting %d deferred inline comments", len(deferred))
-        for item in deferred:
-            self._post_issue_inline(
-                item["page_id"],
-                state,
-                item["comment"],
-                *item["anchors"],
-                original_position=item.get("original_position"),
-            )
+        if skip_inline:
+            logger.info("[REVIEW] Skipping %d deferred inline comments (skip_inline=True)", len(deferred))
+        else:
+            logger.info("[REVIEW] Posting %d deferred inline comments", len(deferred))
+            for item in deferred:
+                self._post_issue_inline(
+                    item["page_id"],
+                    state,
+                    item["comment"],
+                    *item["anchors"],
+                    original_position=item.get("original_position"),
+                )
 
         if state["inline_failures"]:
             state["footer_notes"].append(f"{len(state['inline_failures'])} issue(s) could not be attached inline")
@@ -1512,4 +1525,5 @@ class ReviewActions:
             "issues": state["issues"],
             "document_type": doc_type,
             "type_specific_checks_applied": type_specific_checks,
+            "footer_summary": state.get("footer_summary", ""),  # Always include summary
         }, None

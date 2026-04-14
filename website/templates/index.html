@@ -13,6 +13,17 @@
             <div class="subtitle">AI-Powered Confluence &amp; GitHub Review Assistant</div>
         </div>
         <div class="sidebar-section">
+            <h3>Quick Access</h3>
+            <button class="sidebar-btn" id="pr-review-btn">
+                <svg class="sidebar-btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                GitHub PR Review
+            </button>
+            <button class="sidebar-btn" id="confluence-review-btn">
+                <svg class="sidebar-btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M1.146 14.2c-.087.14-.048.326.092.413l2.146 1.34c.14.087.326.048.413-.093.796-1.26 1.7-2.87 3.637-2.87 1.834 0 2.5 1.063 4.544 1.063 2.734 0 4.022-2.093 4.022-2.093.087-.14.048-.326-.092-.413L13.762 10.2c-.14-.087-.326-.048-.413.093-.796 1.26-1.3 1.707-2.783 1.707-1.834 0-2.9-1.063-4.544-1.063-2.734 0-3.88 2.003-4.876 3.263zM1.146 7.2c-.087.14-.048.326.092.413l2.146 1.34c.14.087.326.048.413-.093C4.593 7.6 5.497 5.99 7.434 5.99c1.834 0 2.5 1.063 4.544 1.063 2.734 0 4.022-2.093 4.022-2.093.087-.14.048-.326-.092-.413L13.762 3.2c-.14-.087-.326-.048-.413.093-.796 1.26-1.3 1.707-2.783 1.707-1.834 0-2.9-1.063-4.544-1.063C3.288 3.937 2.142 5.94 1.146 7.2z"></path></svg>
+                Confluence Page Review
+            </button>
+        </div>
+        <div class="sidebar-section">
             <h3>Capabilities</h3>
             <div class="sidebar-item"><span class="dot"></span> Confluence Page Review</div>
             <div class="sidebar-item"><span class="dot"></span> GitHub PR Review</div>
@@ -31,9 +42,316 @@
             MunnAI v1.0
         </div>
     </div>
-    <div class="main">
+
+    <!-- PR Review Panel (modal overlay) -->
+    <div class="pr-review-panel" id="pr-review-panel">
+        <div class="panel-modal">
+            <div class="panel-header">
+                <h2>GitHub PR Review</h2>
+                <button class="close-btn" id="pr-review-close">&times;</button>
+            </div>
+            <div class="panel-content">
+                <!-- PR Link Input -->
+                <div class="form-group">
+                    <label>GitHub PR Link</label>
+                    <div class="input-group">
+                        <input type="text" id="pr-link-input" placeholder="https://github.com/owner/repo/pull/123" class="pr-link-input">
+                        <button class="parse-btn" id="parse-pr-btn">Parse</button>
+                    </div>
+                    <div class="pr-info" id="pr-info" style="display:none;">
+                        PR: <span id="pr-display">-</span>
+                    </div>
+                </div>
+
+                <!-- Review Checklist -->
+                <div class="form-group">
+                    <label>Review Checklist</label>
+                    <p class="form-hint">Check the items you want reviewed. Add custom items as needed.</p>
+                    <div class="checklist-controls">
+                        <button class="add-item-btn" id="add-check-item">+ Add Item</button>
+                        <button class="add-item-btn select-all-btn" id="select-all-btn">Select All</button>
+                        <button class="add-item-btn deselect-all-btn" id="deselect-all-btn">Deselect All</button>
+                    </div>
+                    <div class="checklist-items" id="checklist-items">
+                        <!-- Naming -->
+                        <div class="check-item" data-category="naming">
+                            <input type="checkbox" checked>
+                            <span>PascalCase Class Names</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="naming">
+                            <input type="checkbox" checked>
+                            <span>camelCase Function Names (JS/TS)</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="naming">
+                            <input type="checkbox" checked>
+                            <span>snake_case Function Names (Python)</span>
+                            
+                        </div>
+                        <!-- Documentation -->
+                        <div class="check-item" data-category="docs">
+                            <input type="checkbox" checked>
+                            <span>Required Comments/Docstrings</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="docs">
+                            <input type="checkbox" checked>
+                            <span>Comment Accuracy</span>
+                            
+                        </div>
+                        <!-- Code Quality -->
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox">
+                            <span>Code Duplication / DRY Violations</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox">
+                            <span>Unused Variables / Imports</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox">
+                            <span>Complex / Long Functions</span>
+                            
+                        </div>
+                        <!-- Security -->
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox">
+                            <span>Hardcoded Secrets / Credentials</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox">
+                            <span>SQL Injection / XSS Risks</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox">
+                            <span>Input Validation</span>
+                            
+                        </div>
+                        <!-- Error Handling -->
+                        <div class="check-item" data-category="errors">
+                            <input type="checkbox">
+                            <span>Proper Error Handling</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="errors">
+                            <input type="checkbox">
+                            <span>Edge Cases Covered</span>
+                            
+                        </div>
+                        <!-- Style / Linting -->
+                        <div class="check-item" data-category="style">
+                            <input type="checkbox">
+                            <span>Flake8 / ESLint Compliance</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="style">
+                            <input type="checkbox">
+                            <span>Consistent Formatting / Indentation</span>
+                            
+                        </div>
+                        <!-- Testing -->
+                        <div class="check-item" data-category="testing">
+                            <input type="checkbox">
+                            <span>Test Coverage for New Code</span>
+                            
+                        </div>
+                        <!-- Performance -->
+                        <div class="check-item" data-category="perf">
+                            <input type="checkbox">
+                            <span>Performance / Efficiency Concerns</span>
+                            
+                        </div>
+                        <!-- Cross-file -->
+                        <div class="check-item" data-category="consistency">
+                            <input type="checkbox">
+                            <span>Cross-file Consistency</span>
+                            
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Expected Output -->
+                <div class="form-group">
+                    <label>Expected Output</label>
+                    <p class="form-hint">Select what the review should produce:</p>
+                    <div class="output-options" id="output-options">
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="out-summary" checked>
+                            <span>Review Summary on the general comment</span>
+                            
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="out-file-level" checked>
+                            <span>Specific comments at file level</span>
+                            
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="out-inline" checked>
+                            <span>Direct inline comments on specific lines</span>
+                            
+                        </div>
+                    </div>
+                    <div class="add-item-row">
+                        <input type="text" id="add-output-input" placeholder="Add custom expected output..." class="add-item-input">
+                        <button type="button" id="add-output-btn" class="add-item-btn">+ Add</button>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button class="btn-primary" id="start-review-btn">Start Review</button>
+                    <button class="btn-secondary" id="back-to-chat-btn">Back to Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confluence Review Panel (modal overlay) -->
+    <div class="pr-review-panel" id="confluence-review-panel">
+        <div class="panel-modal">
+            <div class="panel-header">
+                <h2>Confluence Page Review</h2>
+                <button class="close-btn" id="confluence-review-close">&times;</button>
+            </div>
+            <div class="panel-content">
+                <!-- Confluence Page Input -->
+                <div class="form-group">
+                    <label>Confluence Page URL or ID</label>
+                    <div class="input-group">
+                        <input type="text" id="confluence-link-input" placeholder="https://yoursite.atlassian.net/wiki/spaces/.../pages/12345 or page ID" class="pr-link-input">
+                        <button class="parse-btn" id="parse-confluence-btn">Parse</button>
+                    </div>
+                    <div class="pr-info" id="confluence-info" style="display:none;">
+                        Page: <span id="confluence-display">-</span>
+                    </div>
+                </div>
+
+                <!-- Document Type -->
+                <div class="form-group">
+                    <label>Document Type</label>
+                    <p class="form-hint">Select the type of document for context-aware review, or leave as None.</p>
+                    <select id="confluence-doc-type" class="doc-type-select">
+                        <option value="">None (general review)</option>
+                        <option value="technical">Technical Documentation</option>
+                        <option value="requirements">Requirements / Spec</option>
+                        <option value="runbook">Runbook / How-To Guide</option>
+                        <option value="meeting-notes">Meeting Notes</option>
+                        <option value="design">Design Document</option>
+                        <option value="release-notes">Release Notes</option>
+                        <option value="api-docs">API Documentation</option>
+                        <option value="policy">Policy / Process Document</option>
+                        <option value="onboarding">Onboarding Guide</option>
+                    </select>
+                </div>
+
+                <!-- Review Checklist -->
+                <div class="form-group">
+                    <label>Review Checklist</label>
+                    <p class="form-hint">Check the items you want reviewed. Add custom items as needed.</p>
+                    <div class="checklist-controls">
+                        <button class="add-item-btn" id="confluence-add-check-item">+ Add Item</button>
+                        <button class="add-item-btn select-all-btn" id="confluence-select-all-btn">Select All</button>
+                        <button class="add-item-btn deselect-all-btn" id="confluence-deselect-all-btn">Deselect All</button>
+                    </div>
+                    <div class="checklist-items" id="confluence-checklist-items">
+                        <!-- Spelling & Grammar -->
+                        <div class="check-item" data-category="spelling">
+                            <input type="checkbox" checked>
+                            <span>Spelling & Grammar</span>
+                        </div>
+                        <div class="check-item" data-category="spelling">
+                            <input type="checkbox" checked>
+                            <span>Repeated Words</span>
+                        </div>
+                        <!-- Readability -->
+                        <div class="check-item" data-category="readability">
+                            <input type="checkbox" checked>
+                            <span>Long Sentences (readability)</span>
+                        </div>
+                        <div class="check-item" data-category="readability">
+                            <input type="checkbox" checked>
+                            <span>Long Paragraphs</span>
+                        </div>
+                        <!-- Structure -->
+                        <div class="check-item" data-category="structure">
+                            <input type="checkbox" checked>
+                            <span>Page Structure & Headings</span>
+                        </div>
+                        <div class="check-item" data-category="structure">
+                            <input type="checkbox">
+                            <span>Table of Contents Present</span>
+                        </div>
+                        <!-- Content Quality -->
+                        <div class="check-item" data-category="content">
+                            <input type="checkbox">
+                            <span>Broken / Missing Links</span>
+                        </div>
+                        <div class="check-item" data-category="content">
+                            <input type="checkbox">
+                            <span>Outdated Information</span>
+                        </div>
+                        <div class="check-item" data-category="content">
+                            <input type="checkbox">
+                            <span>Consistent Terminology</span>
+                        </div>
+                        <!-- Formatting -->
+                        <div class="check-item" data-category="formatting">
+                            <input type="checkbox">
+                            <span>Consistent Formatting</span>
+                        </div>
+                        <div class="check-item" data-category="formatting">
+                            <input type="checkbox">
+                            <span>Proper Use of Code Blocks</span>
+                        </div>
+                        <!-- Completeness -->
+                        <div class="check-item" data-category="completeness">
+                            <input type="checkbox">
+                            <span>Missing Sections / Incomplete Content</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Expected Output -->
+                <div class="form-group">
+                    <label>Expected Output</label>
+                    <p class="form-hint">Select what the review should produce:</p>
+                    <div class="output-options" id="confluence-output-options">
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="conf-out-summary" checked>
+                            <span>Review Summary as footer comment</span>
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="conf-out-inline" checked>
+                            <span>Inline comments on specific issues</span>
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="conf-out-suggestions">
+                            <span>Rewrite suggestions for flagged sections</span>
+                        </div>
+                    </div>
+                    <div class="add-item-row">
+                        <input type="text" id="confluence-add-output-input" placeholder="Add custom expected output..." class="add-item-input">
+                        <button type="button" id="confluence-add-output-btn" class="add-item-btn">+ Add</button>
+                    </div>
+                </div>
+
+                <div class="panel-actions">
+                    <button class="btn-primary" id="start-confluence-review-btn">Start Review</button>
+                    <button class="btn-secondary" id="confluence-back-to-chat-btn">Back to Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Chat Area -->
+    <div class="main" id="main-chat">
         <div class="chat-area" id="chat-scroll">
-            <div class="chat-inner" id="chat"></div>
+            <div class="chat-inner" id="chat">
+                <div class="msg bot"><div class="msg-inner"><div class="msg-body">Hi! I am MunnAI, how may I help you today?</div></div></div>
+            </div>
         </div>
         <div class="input-bar">
             <div class="input-wrap">
@@ -45,236 +363,565 @@
     </div>
 <script>
 const chat = document.getElementById("chat");
-const chatScroll = document.getElementById("chat-scroll");
 const input = document.getElementById("input");
-const sendBtn = document.getElementById("send");
+const send = document.getElementById("send");
 const requestHint = document.getElementById("request-hint");
-const conversationHistory = [];
-const WAIT_STAGES = [
-    {
-        after: 0,
-        title: "Preparing request",
-        detail: "Sending your prompt and preparing the request context.",
-        stream: "On it! Getting your request ready..."
-    },
-    {
-        after: 1600,
-        title: "Gathering context",
-        detail: "Gathering the relevant pages, files, and conversation context.",
-        stream: "Let me take a look at what you need..."
-    },
-    {
-        after: 5200,
-        title: "Working",
-        detail: "Working through the task and preparing the next actions.",
-        stream: "Working through this step by step..."
-    },
-    {
-        after: 11000,
-        title: "Finalizing",
-        detail: "Finalizing tool results and assembling the response.",
-        stream: "Almost there, putting it all together for you..."
+const sidebar = document.querySelector(".sidebar");
+const prReviewPanel = document.getElementById("pr-review-panel");
+const mainChat = document.getElementById("main-chat");
+const prReviewBtn = document.getElementById("pr-review-btn");
+const prReviewClose = document.getElementById("pr-review-close");
+const backToChatBtn = document.getElementById("back-to-chat-btn");
+const startReviewBtn = document.getElementById("start-review-btn");
+const parsePrBtn = document.getElementById("parse-pr-btn");
+const prLinkInput = document.getElementById("pr-link-input");
+const prInfo = document.getElementById("pr-info");
+const prDisplay = document.getElementById("pr-display");
+const checklistItems = document.getElementById("checklist-items");
+const addCheckItemBtn = document.getElementById("add-check-item");
+const selectAllBtn = document.getElementById("select-all-btn");
+const deselectAllBtn = document.getElementById("deselect-all-btn");
+
+// --- PR Review Panel ---
+prReviewBtn.addEventListener("click", function() {
+    prReviewPanel.style.display = "flex";
+    mainChat.style.display = "none";
+    sidebar.style.display = "none";
+});
+prReviewClose.addEventListener("click", function() {
+    prReviewPanel.style.display = "none";
+    mainChat.style.display = "flex";
+    sidebar.style.display = "";
+});
+backToChatBtn.addEventListener("click", function() {
+    prReviewPanel.style.display = "none";
+    mainChat.style.display = "flex";
+    sidebar.style.display = "";
+});
+
+// Parse PR link
+parsePrBtn.addEventListener("click", function() {
+    var link = prLinkInput.value.trim();
+    var match = link.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
+    if (match) {
+        prDisplay.textContent = match[1] + "/" + match[2] + "#" + match[3];
+        prInfo.style.display = "block";
+    } else {
+        alert("Invalid PR link. Use: https://github.com/owner/repo/pull/123");
     }
-];
+});
 
-function esc(text) {
-    const d = document.createElement("div");
-    d.textContent = text;
-    return d.innerHTML;
-}
+// Select All / Deselect All for checklist
+selectAllBtn.addEventListener("click", function() {
+    checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
+});
+deselectAllBtn.addEventListener("click", function() {
+    checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
+});
 
-function formatClock(date = new Date()) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
+// Add checklist item
+addCheckItemBtn.addEventListener("click", function() {
+    var newItem = prompt("Enter review item name:");
+    if (newItem && newItem.trim()) {
+        var div = document.createElement("div");
+        div.className = "check-item";
+        div.setAttribute("data-category", "custom");
+        div.innerHTML = '<input type="checkbox" checked><span>' + newItem.trim().replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
+        checklistItems.appendChild(div);
 
-function formatElapsed(ms) {
-    const seconds = Math.max(1, Math.floor(ms / 1000));
-    if (seconds < 60) {
-        return `${seconds}s`;
     }
-    const mins = Math.floor(seconds / 60);
-    const rem = seconds % 60;
-    return `${mins}m ${rem}s`;
-}
+});
 
-function getStage(elapsedMs) {
-    let active = WAIT_STAGES[0];
-    let index = 0;
-    for (let i = 0; i < WAIT_STAGES.length; i += 1) {
-        if (elapsedMs >= WAIT_STAGES[i].after) {
-            active = WAIT_STAGES[i];
-            index = i;
-        }
-    }
-    return { ...active, index };
-}
 
-function getProgressPercent(elapsedMs) {
-    const seconds = elapsedMs / 1000;
-    if (seconds < 2) return 16 + seconds * 10;
-    if (seconds < 6) return 36 + (seconds - 2) * 8;
-    if (seconds < 12) return 68 + (seconds - 6) * 3.2;
-    if (seconds < 25) return 87 + (seconds - 12) * 0.35;
-    return 92;
-}
 
-function formatBotText(text) {
-    let safe = esc(text);
-    safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    safe = safe.replace(/^### (.+)$/gm, '<strong style="font-size:15px;">$1</strong>');
-    safe = safe.replace(/^## (.+)$/gm, '<strong style="font-size:16px;">$1</strong>');
-    safe = safe.replace(/^  - /gm, "  - ");
-    safe = safe.replace(/^- /gm, "- ");
-    return safe;
-}
-
-function addMsg(role, text, badges, isStatus) {
-    const div = document.createElement("div");
-    div.className = "msg " + role;
-    let badgeHtml = "";
-    if (badges && badges.length) {
-        badgeHtml = '<div class="badge-row">' +
-            badges.map((badge) => `<span class="detected-badge">${esc(badge)}</span>`).join("") +
-            "</div>";
-    }
-    const timeStr = formatClock();
-    const bodyClass = isStatus ? "msg-body status-text" : "msg-body";
-    div.innerHTML = `<div class="msg-inner">
-        <div class="msg-time">${timeStr}</div>
-        ${badgeHtml}
-        <div class="${bodyClass}">${role === "user" ? esc(text) : formatBotText(text)}</div>
-    </div>`;
-    chat.appendChild(div);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
-    return div;
-}
-
-function addLoading() {
-    const div = document.createElement("div");
-    div.className = "msg bot";
-    div.id = "loader";
-    div.innerHTML = `<div class="msg-inner loading-card">
-        <div class="loading-header">
-            <div class="loading-title">Preparing request</div>
-            <div class="loading-elapsed">1s</div>
-        </div>
-        <div class="loading-stream"><span class="loading-stream-text"></span><span class="loading-cursor">|</span></div>
-        <div class="loading-progress-track">
-            <div class="loading-progress-bar"></div>
-        </div>
-    </div>`;
-    chat.appendChild(div);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
-
-    const startedAt = Date.now();
-    const titleNode = div.querySelector(".loading-title");
-    const elapsedNode = div.querySelector(".loading-elapsed");
-    const progressNode = div.querySelector(".loading-progress-bar");
-    const streamTextNode = div.querySelector(".loading-stream-text");
-    let currentStageIdx = -1;
-    let typeTimer = null;
-    let charIdx = 0;
-
-    function typeStream(text) {
-        if (typeTimer) clearInterval(typeTimer);
-        streamTextNode.textContent = "";
-        charIdx = 0;
-        typeTimer = setInterval(() => {
-            if (charIdx < text.length) {
-                streamTextNode.textContent += text[charIdx];
-                charIdx++;
-            } else {
-                clearInterval(typeTimer);
-                typeTimer = null;
-            }
-        }, 28);
-    }
-
-    const update = () => {
-        const elapsedMs = Date.now() - startedAt;
-        const stage = getStage(elapsedMs);
-        titleNode.textContent = stage.title;
-        elapsedNode.textContent = formatElapsed(elapsedMs);
-        progressNode.style.width = `${Math.min(96, getProgressPercent(elapsedMs))}%`;
-        const newStageIdx = WAIT_STAGES.indexOf(stage);
-        if (newStageIdx !== currentStageIdx) {
-            currentStageIdx = newStageIdx;
-            typeStream(stage.stream);
-        }
-    };
-
-    update();
-    const intervalId = window.setInterval(update, 250);
-
-    return {
-        remove() {
-            window.clearInterval(intervalId);
-            if (typeTimer) clearInterval(typeTimer);
-            div.remove();
-        }
-    };
-}
-
-async function send() {
-    const text = input.value.trim();
+// Add expected output item
+document.getElementById("add-output-btn").addEventListener("click", function() {
+    var input = document.getElementById("add-output-input");
+    var text = input.value.trim();
     if (!text) return;
+    var div = document.createElement("div");
+    div.className = "check-item output-item";
+    div.innerHTML = '<input type="checkbox" checked><span>' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
+    document.getElementById("output-options").appendChild(div);
+    div.querySelector(".remove-output-btn").addEventListener("click", function() { div.remove(); });
+    input.value = "";
+});
+document.getElementById("add-output-input").addEventListener("keydown", function(e) {
+    if (e.key === "Enter") { e.preventDefault(); document.getElementById("add-output-btn").click(); }
+});
+
+
+
+// Start Review - builds prompt and sends to chat
+startReviewBtn.addEventListener("click", function() {
+    var prLink = prLinkInput.value.trim();
+    if (!prLink) { alert("Please enter a PR link"); return; }
+    var match = prLink.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
+    if (!match) { alert("Invalid PR link format"); return; }
+
+    // Gather selected expected outputs (dynamic)
+    var outputs = [];
+    document.querySelectorAll("#output-options .output-item").forEach(function(item) {
+        if (item.querySelector("input").checked) {
+            outputs.push(item.querySelector("span").textContent.trim());
+        }
+    });
+
+    if (outputs.length === 0) { alert("Please select at least one expected output type"); return; }
+
+    // Gather selected checklist items
+    var items = checklistItems.querySelectorAll(".check-item");
+    var checklist = [];
+    items.forEach(function(item) {
+        if (item.querySelector("input").checked) {
+            checklist.push(item.querySelector("span").textContent);
+        }
+    });
+
+    var owner = match[1], repo = match[2], prNum = match[3];
+
+    // Build the prompt
+    var msg = "Review this GitHub PR and post the review: https://github.com/" + owner + "/" + repo + "/pull/" + prNum;
+
+    // Add expected output instructions
+    msg += "\n\nExpected output:\n- " + outputs.join("\n- ");
+
+    // Add checklist
+    if (checklist.length > 0) {
+        msg += "\n\nChecklist items to review:\n- " + checklist.join("\n- ");
+    }
+
+    // Switch to chat and send review request
+    prReviewPanel.style.display = "none";
+    mainChat.style.display = "flex";
+    sidebar.style.display = "";
+    prLinkInput.value = "";
+    prInfo.style.display = "none";
+
+    // Show the full review request in chat bubble
+    var userMsg = document.createElement("div");
+    userMsg.className = "msg user";
+    userMsg.innerHTML = '<div class="msg-inner"><div class="msg-body"></div></div>';
+    userMsg.querySelector(".msg-body").textContent = msg;
+    chat.appendChild(userMsg);
+    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+
+    chatHistory.push({role: "user", text: msg});
+    requestHint.textContent = "Sending request...";
+    requestHint.style.color = "#666";
+
+    // Stream live progress via SSE
+    var botBubble = document.createElement("div");
+    botBubble.className = "msg bot";
+    botBubble.innerHTML = '<div class="msg-inner"><div class="msg-body"><span class="sse-progress"></span></div></div>';
+    chat.appendChild(botBubble);
+    var progressEl = botBubble.querySelector(".sse-progress");
+    var progressLines = [];
+
+    function appendProgress(text, cssClass) {
+        var line = document.createElement("div");
+        var now = new Date();
+        var ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+        line.innerHTML = '<span class="sse-time">' + ts + '</span> ' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        if (cssClass) line.className = cssClass;
+        progressEl.appendChild(line);
+        chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+    }
+
+    appendProgress("\u23f3 Starting review...", "sse-line sse-info");
+
+    (async function() {
+        try {
+            var res = await fetch("/api/review-stream", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({prompt: msg, history: chatHistory, checklist: checklist, outputs: outputs})
+            });
+
+            if (!res.ok || !res.body) {
+                // Fallback: try regular chat endpoint
+                appendProgress("\u2022 Streaming unavailable, using direct review...", "sse-line sse-info");
+                var res2 = await fetch("/api/chat", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({prompt: msg, history: chatHistory})
+                });
+                var data2 = await res2.json();
+                var resp = data2.response || data2.error || "No response";
+                appendProgress("\u2705 " + resp.split("\n")[0], "sse-line sse-done");
+                chatHistory.push({role: "assistant", text: resp});
+                requestHint.textContent = "Review complete";
+                requestHint.style.color = "#2e7d32";
+                return;
+            }
+
+            var reader = res.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = "";
+            var finalMessage = "";
+
+            while (true) {
+                var chunk = await reader.read();
+                if (chunk.done) break;
+                buffer += decoder.decode(chunk.value, {stream: true});
+
+                var parts = buffer.split("\n\n");
+                buffer = parts.pop();
+
+                for (var i = 0; i < parts.length; i++) {
+                    var part = parts[i].trim();
+                    if (!part.startsWith("data: ")) continue;
+                    try {
+                        var evt = JSON.parse(part.substring(6));
+                        if (evt.type === "progress") {
+                            appendProgress("\u2022 " + evt.message, "sse-line sse-step");
+                            requestHint.textContent = evt.message;
+                        } else if (evt.type === "done") {
+                            finalMessage = evt.message;
+                            appendProgress("\u2705 " + evt.message.split("\n")[0], "sse-line sse-done");
+                            requestHint.textContent = "Review complete";
+                            requestHint.style.color = "#2e7d32";
+                        } else if (evt.type === "error") {
+                            finalMessage = evt.message;
+                            appendProgress("\u274c " + evt.message, "sse-line sse-error");
+                            requestHint.textContent = "Review failed";
+                            requestHint.style.color = "#d32f2f";
+                        }
+                    } catch(e) {}
+                }
+            }
+
+            chatHistory.push({role: "assistant", text: finalMessage || "Review completed"});
+        } catch (err) {
+            // Fallback: try regular chat endpoint
+            appendProgress("\u2022 Retrying with direct review...", "sse-line sse-info");
+            try {
+                var res3 = await fetch("/api/chat", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({prompt: msg, history: chatHistory})
+                });
+                var data3 = await res3.json();
+                var resp3 = data3.response || data3.error || "No response";
+                appendProgress("\u2705 " + resp3.split("\n")[0], "sse-line sse-done");
+                chatHistory.push({role: "assistant", text: resp3});
+                requestHint.textContent = "Review complete";
+                requestHint.style.color = "#2e7d32";
+            } catch (err2) {
+                appendProgress("\u274c Error: " + err2.message, "sse-line sse-error");
+                requestHint.textContent = "Error: " + err2.message;
+                requestHint.style.color = "#d32f2f";
+            }
+        }
+    })();
+});
+
+// --- Original Chat ---
+var chatHistory = [];
+
+send.addEventListener("click", async function() {
+    var msg = input.value.trim();
+    if (!msg) return;
 
     input.value = "";
-    input.style.height = "44px";
-    addMsg("user", text);
-    conversationHistory.push({ role: "user", text });
+    var userMsg = document.createElement("div");
+    userMsg.className = "msg user";
+    userMsg.innerHTML = '<div class="msg-inner"><div class="msg-body"></div></div>';
+    userMsg.querySelector(".msg-body").textContent = msg;
+    chat.appendChild(userMsg);
+    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
 
-    sendBtn.disabled = true;
-    sendBtn.textContent = "Working...";
-    requestHint.textContent = "Live status updates are shown in the active response card.";
-    const loader = addLoading();
+    chatHistory.push({role: "user", text: msg});
+    requestHint.textContent = "Sending request...";
+    requestHint.style.color = "#666";
 
     try {
-        const res = await fetch("/api/chat", {
+        var res = await fetch("/api/chat", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: text, history: conversationHistory }),
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({prompt: msg, history: chatHistory})
         });
-        const data = await res.json();
-        loader.remove();
+        var data = await res.json();
+        var response = data.response || data.error || "No response";
 
-        if (data.error) {
-            addMsg("bot", `Error: ${data.error}`, data.detected || null, true);
-        } else if (data.response) {
-            addMsg("bot", data.response, data.detected || null);
-            conversationHistory.push({ role: "bot", text: data.response });
-            if (data.mode === "fast_path") {
-                addMsg("bot", "Used the fast review path for this request.", null, true);
-            } else if (data.detected && data.detected.length) {
-                addMsg("bot", "Task completed successfully.", null, true);
-            }
-        } else {
-            addMsg("bot", "No response returned.", null, true);
+        var assistantMsg = document.createElement("div");
+        assistantMsg.className = "msg bot";
+        assistantMsg.innerHTML = '<div class="msg-inner"><div class="msg-body">' + response.replace(/\n/g, "<br>") + '</div></div>';
+        chat.appendChild(assistantMsg);
+        chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+
+        chatHistory.push({role: "assistant", text: response});
+        requestHint.textContent = "Ready for next request";
+        requestHint.style.color = "#999";
+    } catch (err) {
+        var errorMsg = document.createElement("div");
+        errorMsg.className = "msg bot";
+        errorMsg.innerHTML = '<div class="msg-inner" style="border-color:#d32f2f;color:#d32f2f;"><div class="msg-body">Error: ' + (err.message || "Unknown error").replace(/</g,"&lt;") + '</div></div>';
+        chat.appendChild(errorMsg);
+        requestHint.textContent = "Error: " + err.message;
+        requestHint.style.color = "#d32f2f";
+    }
+});
+
+input.addEventListener("keydown", function(e) {
+    if (e.ctrlKey && e.key === "Enter") { send.click(); }
+});
+
+// --- Confluence Review Panel ---
+var confPanel = document.getElementById("confluence-review-panel");
+var confReviewBtn = document.getElementById("confluence-review-btn");
+var confCloseBtn = document.getElementById("confluence-review-close");
+var confBackBtn = document.getElementById("confluence-back-to-chat-btn");
+var confStartBtn = document.getElementById("start-confluence-review-btn");
+var confLinkInput = document.getElementById("confluence-link-input");
+var confParseBtn = document.getElementById("parse-confluence-btn");
+var confInfo = document.getElementById("confluence-info");
+var confDisplay = document.getElementById("confluence-display");
+var confDocType = document.getElementById("confluence-doc-type");
+var confChecklistItems = document.getElementById("confluence-checklist-items");
+
+confReviewBtn.addEventListener("click", function() {
+    confPanel.style.display = "flex";
+    mainChat.style.display = "none";
+    sidebar.style.display = "none";
+});
+confCloseBtn.addEventListener("click", function() {
+    confPanel.style.display = "none";
+    mainChat.style.display = "flex";
+    sidebar.style.display = "";
+});
+confBackBtn.addEventListener("click", function() {
+    confPanel.style.display = "none";
+    mainChat.style.display = "flex";
+    sidebar.style.display = "";
+});
+
+// Parse Confluence link
+confParseBtn.addEventListener("click", function() {
+    var link = confLinkInput.value.trim();
+    // Try URL pattern: .../pages/12345/... or .../pages/12345
+    var match = link.match(/pages\/([0-9]+)/);
+    if (match) {
+        confDisplay.textContent = "Page ID: " + match[1];
+        confInfo.style.display = "block";
+        return;
+    }
+    // Try raw numeric page ID
+    if (/^\d+$/.test(link)) {
+        confDisplay.textContent = "Page ID: " + link;
+        confInfo.style.display = "block";
+        return;
+    }
+    alert("Could not parse Confluence page. Use a URL with /pages/12345 or enter a numeric page ID.");
+});
+
+// Confluence checklist controls
+document.getElementById("confluence-select-all-btn").addEventListener("click", function() {
+    confChecklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
+});
+document.getElementById("confluence-deselect-all-btn").addEventListener("click", function() {
+    confChecklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
+});
+document.getElementById("confluence-add-check-item").addEventListener("click", function() {
+    var newItem = prompt("Enter review item name:");
+    if (newItem && newItem.trim()) {
+        var div = document.createElement("div");
+        div.className = "check-item";
+        div.setAttribute("data-category", "custom");
+        div.innerHTML = '<input type="checkbox" checked><span>' + newItem.trim().replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
+        confChecklistItems.appendChild(div);
+    }
+});
+
+// Add confluence expected output item
+document.getElementById("confluence-add-output-btn").addEventListener("click", function() {
+    var inp = document.getElementById("confluence-add-output-input");
+    var text = inp.value.trim();
+    if (!text) return;
+    var div = document.createElement("div");
+    div.className = "check-item output-item";
+    div.innerHTML = '<input type="checkbox" checked><span>' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
+    document.getElementById("confluence-output-options").appendChild(div);
+    inp.value = "";
+});
+document.getElementById("confluence-add-output-input").addEventListener("keydown", function(e) {
+    if (e.key === "Enter") { e.preventDefault(); document.getElementById("confluence-add-output-btn").click(); }
+});
+
+// Start Confluence Review
+confStartBtn.addEventListener("click", function() {
+    var link = confLinkInput.value.trim();
+    if (!link) { alert("Please enter a Confluence page URL or ID"); return; }
+
+    // Extract page ID
+    var pageId = null;
+    var match = link.match(/pages\/([0-9]+)/);
+    if (match) {
+        pageId = match[1];
+    } else if (/^\d+$/.test(link)) {
+        pageId = link;
+    } else {
+        alert("Could not parse page ID from input.");
+        return;
+    }
+
+    // Gather document type
+    var docType = confDocType.value;
+
+    // Gather selected checklist items
+    var checklist = [];
+    confChecklistItems.querySelectorAll(".check-item").forEach(function(item) {
+        if (item.querySelector("input").checked) {
+            checklist.push(item.querySelector("span").textContent);
         }
-    } catch (e) {
-        loader.remove();
-        addMsg("bot", `Error: ${e.message}`, null, true);
+    });
+
+    // Gather selected expected outputs
+    var outputs = [];
+    document.querySelectorAll("#confluence-output-options .output-item").forEach(function(item) {
+        if (item.querySelector("input").checked) {
+            outputs.push(item.querySelector("span").textContent.trim());
+        }
+    });
+    if (outputs.length === 0) { alert("Please select at least one expected output type"); return; }
+
+    // Build prompt
+    var msg = "Review this Confluence page: " + link;
+    if (docType) {
+        msg += "\n\nDocument type: " + docType;
+    }
+    msg += "\n\nExpected output:\n- " + outputs.join("\n- ");
+    if (checklist.length > 0) {
+        msg += "\n\nChecklist items to review:\n- " + checklist.join("\n- ");
     }
 
-    sendBtn.disabled = false;
-    sendBtn.textContent = "Send";
-    requestHint.textContent = "Live progress is shown while MunnAI works through your request.";
-    input.focus();
-}
+    // Switch to chat
+    confPanel.style.display = "none";
+    mainChat.style.display = "flex";
+    sidebar.style.display = "";
 
-sendBtn.addEventListener("click", send);
-input.addEventListener("keydown", (e) => {
-    if (e.ctrlKey && e.key === "Enter") {
-        e.preventDefault();
-        send();
+    // Show user message in chat
+    var userMsg = document.createElement("div");
+    userMsg.className = "msg user";
+    userMsg.innerHTML = '<div class="msg-inner"><div class="msg-body"></div></div>';
+    userMsg.querySelector(".msg-body").textContent = msg;
+    chat.appendChild(userMsg);
+    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+
+    chatHistory.push({role: "user", text: msg});
+    requestHint.textContent = "Sending request...";
+    requestHint.style.color = "#666";
+
+    // SSE live progress
+    var botBubble = document.createElement("div");
+    botBubble.className = "msg bot";
+    botBubble.innerHTML = '<div class="msg-inner"><div class="msg-body"><span class="sse-progress"></span></div></div>';
+    chat.appendChild(botBubble);
+    var progressEl = botBubble.querySelector(".sse-progress");
+
+    function confAppendProgress(text, cssClass) {
+        var line = document.createElement("div");
+        var now = new Date();
+        var ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+        line.innerHTML = '<span class="sse-time">' + ts + '</span> ' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        if (cssClass) line.className = cssClass;
+        progressEl.appendChild(line);
+        chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
     }
-});
-input.addEventListener("input", () => {
-    input.style.height = "44px";
-    input.style.height = Math.min(input.scrollHeight, 150) + "px";
-});
 
-addMsg("bot", "Hi! I am MunnAI, how may I help you today?");
+    confAppendProgress("\u23f3 Starting Confluence review...", "sse-line sse-info");
+
+    (async function() {
+        try {
+            var res = await fetch("/api/confluence-review-stream", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    page_id: pageId,
+                    page_input: link,
+                    doc_type: docType,
+                    checklist: checklist,
+                    outputs: outputs,
+                    prompt: msg,
+                    history: chatHistory
+                })
+            });
+
+            if (!res.ok || !res.body) {
+                confAppendProgress("\u2022 Streaming unavailable, using direct review...", "sse-line sse-info");
+                var res2 = await fetch("/api/chat", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({prompt: msg, history: chatHistory})
+                });
+                var data2 = await res2.json();
+                var resp = data2.response || data2.error || "No response";
+                confAppendProgress("\u2705 " + resp.split("\n")[0], "sse-line sse-done");
+                chatHistory.push({role: "assistant", text: resp});
+                requestHint.textContent = "Review complete";
+                requestHint.style.color = "#2e7d32";
+                return;
+            }
+
+            var reader = res.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = "";
+            var finalMessage = "";
+
+            while (true) {
+                var chunk = await reader.read();
+                if (chunk.done) break;
+                buffer += decoder.decode(chunk.value, {stream: true});
+
+                var parts = buffer.split("\n\n");
+                buffer = parts.pop();
+
+                for (var i = 0; i < parts.length; i++) {
+                    var part = parts[i].trim();
+                    if (!part.startsWith("data: ")) continue;
+                    try {
+                        var evt = JSON.parse(part.substring(6));
+                        if (evt.type === "progress") {
+                            confAppendProgress("\u2022 " + evt.message, "sse-line sse-step");
+                            requestHint.textContent = evt.message;
+                        } else if (evt.type === "done") {
+                            finalMessage = evt.message;
+                            confAppendProgress("\u2705 " + evt.message.split("\n")[0], "sse-line sse-done");
+                            requestHint.textContent = "Review complete";
+                            requestHint.style.color = "#2e7d32";
+                        } else if (evt.type === "error") {
+                            finalMessage = evt.message;
+                            confAppendProgress("\u274c " + evt.message, "sse-line sse-error");
+                            requestHint.textContent = "Review failed";
+                            requestHint.style.color = "#d32f2f";
+                        }
+                    } catch(e) {}
+                }
+            }
+
+            chatHistory.push({role: "assistant", text: finalMessage || "Review completed"});
+        } catch (err) {
+            confAppendProgress("\u2022 Retrying with direct review...", "sse-line sse-info");
+            try {
+                var res3 = await fetch("/api/chat", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({prompt: msg, history: chatHistory})
+                });
+                var data3 = await res3.json();
+                var resp3 = data3.response || data3.error || "No response";
+                confAppendProgress("\u2705 " + resp3.split("\n")[0], "sse-line sse-done");
+                chatHistory.push({role: "assistant", text: resp3});
+                requestHint.textContent = "Review complete";
+                requestHint.style.color = "#2e7d32";
+            } catch (err2) {
+                confAppendProgress("\u274c Error: " + err2.message, "sse-line sse-error");
+                requestHint.textContent = "Error: " + err2.message;
+                requestHint.style.color = "#d32f2f";
+            }
+        }
+    })();
+});
 </script>
 </body>
 </html>

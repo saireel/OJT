@@ -173,12 +173,20 @@ class ConfluenceAPI:
         return result
 
     def post_footer_comment(self, page_id: str, comment: str) -> Tuple[Optional[requests.Response], Optional[str]]:
-        """Post a footer comment to the target Confluence page."""
+        """Post a footer comment to the target Confluence page using v2 API."""
         if not page_id or not comment:
             return None, "page_id and comment are required"
         html_comment = self._markdown_to_confluence_html(comment)
-        data = {"type": "comment", "body": {"storage": {"value": html_comment, "representation": "storage"}}, "container": {"type": "page", "id": page_id}}
-        return self._request("POST", "/rest/api/content", json=data)
+        data = {
+            "pageId": page_id,
+            "body": {
+                "storage": {
+                    "value": html_comment,
+                    "representation": "storage"
+                }
+            }
+        }
+        return self._request("POST", "/api/v2/footer-comments", json=data)
 
     def post_inline_comment(
         self,

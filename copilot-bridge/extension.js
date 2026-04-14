@@ -20,30 +20,69 @@ function classifyTask(promptText) {
     return fastKeywords.some((kw) => text.includes(kw)) ? "fast" : "default";
 }
 
-async function pickModelByFamilies(families) {
-    for (const family of families) {
-        const models = await vscode.lm.selectChatModels({
-            vendor: "copilot",
-            family
+function normalizeHints(value, fallback) {
+    const source = Array.isArray(value) ? value : fallback;
+    const seen = new Set();
+    const normalized = [];
+
+    for (const item of source) {
+        const hint = String(item || "").trim().toLowerCase();
+        if (!hint || seen.has(hint)) {
+            continue;
+        }
+        seen.add(hint);
+        normalized.push(hint);
+    }
+
+    return normalized.length > 0 ? normalized : fallback;
+}
+
+function getPreferredHints(profile) {
+    const defaultFastHints = ["claude", "haiku", "sonnet"];
+    const defaultRegularHints = ["claude", "sonnet", "opus"];
+    const config = vscode.workspace.getConfiguration("copilotBridge");
+
+    const fastHints = normalizeHints(
+        config.get("fastModelHints", defaultFastHints),
+        defaultFastHints
+    );
+    const regularHints = normalizeHints(
+        config.get("defaultModelHints", defaultRegularHints),
+        defaultRegularHints
+    );
+
+    return profile === "fast" ? fastHints : regularHints;
+}
+
+async function pickModelByHints(hints) {
+    const models = await vscode.lm.selectChatModels({ vendor: "copilot" });
+    if (!models || models.length === 0) {
+        return null;
+    }
+
+    for (const hint of hints) {
+        const normalizedHint = String(hint || "").toLowerCase();
+        const match = models.find((model) => {
+            const name = String(model.name || "").toLowerCase();
+            const family = String(model.family || "").toLowerCase();
+            return name.includes(normalizedHint) || family.includes(normalizedHint);
         });
-        if (models && models.length > 0) {
-            selectedModelName = models[0].name || family;
-            selectedModelFamily = family;
-            return models[0];
+
+        if (match) {
+            selectedModelName = match.name || "unknown";
+            selectedModelFamily = match.family || "unknown";
+            return match;
         }
     }
+
     return null;
 }
 
 async function resolveModel(promptText) {
     const profile = classifyTask(promptText);
+    const preferredHints = getPreferredHints(profile);
 
-    // Prioritize faster families for lightweight requests.
-    const fastFamilies = ["gpt-4.1", "gpt-4o", "gpt-4"];
-    const defaultFamilies = ["gpt-4.1", "gpt-4o", "gpt-4"];
-    const preferredFamilies = profile === "fast" ? fastFamilies : defaultFamilies;
-
-    let model = await pickModelByFamilies(preferredFamilies);
+    let model = await pickModelByHints(preferredHints);
 
     // Last-resort fallback: ask Copilot for anything available.
     if (!model) {
@@ -51,7 +90,7 @@ async function resolveModel(promptText) {
         if (fallback && fallback.length > 0) {
             model = fallback[0];
             selectedModelName = fallback[0].name || "unknown";
-            selectedModelFamily = "fallback-any";
+            selectedModelFamily = fallback[0].family || "fallback-any";
         }
     }
 
