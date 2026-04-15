@@ -33,7 +33,7 @@ class GitHubActions:
             # - Accept: "application/vnd.github+json" is GitHub's recommended
             # media type.
             self._headers = {
-                "Authorization": f"Bearer {config.GITHUB_TOKEN}",
+                "Authorization": f"Bearer {self._github_token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
@@ -51,6 +51,17 @@ class GitHubActions:
                 owner, name = normalized.split("/", 1)
                 return f"{owner.strip()}/{name.strip()}"
             return f"{self._owner}/{normalized}"
+
+    def set_runtime_auth(self, owner: str | None = None, github_token: str | None = None, base_url: str | None = None):
+            """Update active GitHub credentials for this runtime process."""
+            if isinstance(owner, str) and owner.strip():
+                self._owner = owner.strip()
+            if isinstance(github_token, str) and github_token.strip():
+                self._github_token = github_token.strip()
+            if isinstance(base_url, str) and base_url.strip():
+                self._base_url = base_url.strip().rstrip("/")
+            if self._github_token:
+                self._headers["Authorization"] = f"Bearer {self._github_token}"
 
     def _request(self, method: str, url: str,
                      data: dict | None = None,

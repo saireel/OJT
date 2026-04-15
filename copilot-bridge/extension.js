@@ -6,6 +6,11 @@ let selectedModelName = null;
 let selectedModelFamily = null;
 const PORT = 5100;
 
+// 🧠 Adaptive state
+let preferFreeModels = false;
+const modelStats = new Map(); // { modelName: { success, avgLatency } }
+
+// -------------------- CLASSIFICATION --------------------
 function classifyTask(promptText) {
     const text = String(promptText || "").toLowerCase();
     const fastKeywords = [
@@ -20,6 +25,7 @@ function classifyTask(promptText) {
     return fastKeywords.some((kw) => text.includes(kw)) ? "fast" : "default";
 }
 
+// -------------------- HINTS --------------------
 function normalizeHints(value, fallback) {
     const source = Array.isArray(value) ? value : fallback;
     const seen = new Set();
@@ -27,9 +33,7 @@ function normalizeHints(value, fallback) {
 
     for (const item of source) {
         const hint = String(item || "").trim().toLowerCase();
-        if (!hint || seen.has(hint)) {
-            continue;
-        }
+        if (!hint || seen.has(hint)) continue;
         seen.add(hint);
         normalized.push(hint);
     }
@@ -54,14 +58,26 @@ function getPreferredHints(profile) {
     return profile === "fast" ? fastHints : regularHints;
 }
 
+// -------------------- MODEL HELPERS --------------------
+function isLikelyFreeModel(model) {
+    const name = (model.name || "").toLowerCase();
+    const family = (model.family || "").toLowerCase();
+
+    return (
+        name.includes("mini") ||
+        name.includes("gpt-4o-mini") ||
+        family.includes("mini") ||
+        family.includes("basic")
+    );
+}
+
 async function pickModelByHints(hints) {
     const models = await vscode.lm.selectChatModels({ vendor: "copilot" });
-    if (!models || models.length === 0) {
-        return null;
-    }
+    if (!models || models.length === 0) return null;
 
     for (const hint of hints) {
         const normalizedHint = String(hint || "").toLowerCase();
+
         const match = models.find((model) => {
             const name = String(model.name || "").toLowerCase();
             const family = String(model.family || "").toLowerCase();
@@ -78,44 +94,35 @@ async function pickModelByHints(hints) {
     return null;
 }
 
+// -------------------- RESOLVE MODEL --------------------
 async function resolveModel(promptText) {
     const profile = classifyTask(promptText);
-    const preferredHints = getPreferredHints(profile);
+    let hints = getPreferredHints(profile);
 
-    let model = await pickModelByHints(preferredHints);
+    //If quota was hit before → force free models
+    if (preferFreeModels) {
+        hints = ["mini", "gpt-4o-mini", "basic"];
+    }
 
-    // Last-resort fallback: ask Copilot for anything available.
+    let model = await pickModelByHints(hints);
+
     if (!model) {
         const fallback = await vscode.lm.selectChatModels({ vendor: "copilot" });
         if (fallback && fallback.length > 0) {
             model = fallback[0];
-            selectedModelName = fallback[0].name || "unknown";
-            selectedModelFamily = fallback[0].family || "fallback-any";
         }
     }
 
     if (!model) {
-        throw new Error(
-            "No Copilot model available. Make sure GitHub Copilot Chat is installed and you are signed in."
-        );
+        throw new Error("No Copilot model available.");
     }
 
     return { model, profile };
 }
 
-async function handlePrompt(promptText) {
-    const startedAt = Date.now();
-    const { model, profile } = await resolveModel(promptText);
-
-    const systemInstruction =
-        "You are MUNN AI, an AI-powered Confluence and GitHub Pull Request Review Assistant. " +
-        "Rules: Never refuse outright. If something cannot be fully completed, provide the closest helpful alternative. " +
-        "Be concise but actionable. Prefer structured outputs when possible. " +
-        "For simple tasks (spelling, grammar, inline comments), finish with minimal tool calls and avoid unnecessary loops.\n\n";
-
-    const messages = [
-        vscode.LanguageModelChatMessage.User(systemInstruction + promptText)
-    ];
+// -------------------- SEND REQUEST --------------------
+async function sendWithModel(model, messages, profile, startedAt) {
+    const name = model.name || "unknown";
 
     const response = await model.sendRequest(
         messages,
@@ -128,15 +135,77 @@ async function handlePrompt(promptText) {
         result += chunk;
     }
 
+    const latency = Date.now() - startedAt;
+
+    // 📊 track performance
+    const stat = modelStats.get(name) || { success: 0, avgLatency: latency };
+    stat.success += 1;
+    stat.avgLatency = (stat.avgLatency + latency) / 2;
+    modelStats.set(name, stat);
+
+    selectedModelName = name;
+    selectedModelFamily = model.family || "unknown";
+
     return {
         text: result.trim(),
-        modelName: selectedModelName,
+        modelName: name,
         modelFamily: selectedModelFamily,
         profile,
-        latencyMs: Date.now() - startedAt
+        latencyMs: latency
     };
 }
 
+// -------------------- HANDLE PROMPT --------------------
+async function handlePrompt(promptText) {
+    const startedAt = Date.now();
+    const { model, profile } = await resolveModel(promptText);
+
+    const systemInstruction =
+        "You are MUNN AI, an AI-powered Confluence and GitHub Pull Request Review Assistant. " +
+        "Rules: Never refuse outright. Provide the closest helpful answer. Be concise.\n\n";
+
+    const messages = [
+        vscode.LanguageModelChatMessage.User(systemInstruction + promptText)
+    ];
+
+    try {
+        return await sendWithModel(model, messages, profile, startedAt);
+    } catch (err) {
+        console.warn("Primary model failed:", err.message);
+
+        // 🔥 Detect quota → switch mode permanently
+        if (err.message?.toLowerCase().includes("quota")) {
+            preferFreeModels = true;
+        }
+
+        const allModels = await vscode.lm.selectChatModels({ vendor: "copilot" });
+
+        let candidates = allModels;
+
+        if (preferFreeModels) {
+            candidates = allModels.filter(isLikelyFreeModel);
+        }
+
+        // 🧠 sort by learned latency
+        candidates.sort((a, b) => {
+            const statA = modelStats.get(a.name) || { avgLatency: Infinity };
+            const statB = modelStats.get(b.name) || { avgLatency: Infinity };
+            return statA.avgLatency - statB.avgLatency;
+        });
+
+        for (const fallback of candidates) {
+            try {
+                return await sendWithModel(fallback, messages, profile, startedAt);
+            } catch {
+                continue;
+            }
+        }
+
+        throw new Error("All Copilot models failed.");
+    }
+}
+
+// -------------------- SERVER --------------------
 function startServer(context) {
     if (server) {
         vscode.window.showInformationMessage(`Copilot Bridge already running on port ${PORT}`);
@@ -144,7 +213,6 @@ function startServer(context) {
     }
 
     server = http.createServer(async (req, res) => {
-        // CORS headers for local Flask app
         res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:5000");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -154,37 +222,53 @@ function startServer(context) {
             res.end();
             return;
         }
+
         if (req.method === "GET" && req.url === "/api/prompt") {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ status: "Copilot Bridge is running", model: selectedModelName, family: selectedModelFamily }));
+            res.end(JSON.stringify({
+                status: "running",
+                model: selectedModelName,
+                family: selectedModelFamily,
+                preferFreeModels
+            }));
         }
+
         else if (req.method === "POST" && req.url === "/api/prompt") {
             let body = "";
+
             req.on("data", (chunk) => { body += chunk; });
+
             req.on("end", async () => {
                 try {
                     const { prompt } = JSON.parse(body);
-                    if (!prompt || typeof prompt !== "string") {
-                        res.writeHead(400, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ error: "Missing or invalid 'prompt' field" }));
+
+                    if (!prompt) {
+                        res.writeHead(400);
+                        res.end(JSON.stringify({ error: "Missing prompt" }));
                         return;
                     }
+
                     const answer = await handlePrompt(prompt);
+
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({
                         response: answer.text,
                         model: answer.modelName,
                         family: answer.modelFamily,
                         profile: answer.profile,
-                        latency_ms: answer.latencyMs
+                        latency_ms: answer.latencyMs,
+                        preferFreeModels
                     }));
+
                 } catch (err) {
-                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.writeHead(500);
                     res.end(JSON.stringify({ error: err.message }));
                 }
             });
-        } else {
-            res.writeHead(404, { "Content-Type": "application/json" });
+        }
+
+        else {
+            res.writeHead(404);
             res.end(JSON.stringify({ error: "Not found" }));
         }
     });
@@ -192,13 +276,9 @@ function startServer(context) {
     server.listen(PORT, "127.0.0.1", () => {
         vscode.window.showInformationMessage(`Copilot Bridge running on http://127.0.0.1:${PORT}`);
     });
-
-    server.on("error", (err) => {
-        vscode.window.showErrorMessage(`Copilot Bridge failed: ${err.message}`);
-        server = null;
-    });
 }
 
+// -------------------- STOP --------------------
 function stopServer() {
     if (server) {
         server.close();
@@ -207,13 +287,13 @@ function stopServer() {
     }
 }
 
+// -------------------- ACTIVATE --------------------
 function activate(context) {
     context.subscriptions.push(
         vscode.commands.registerCommand("copilotBridge.start", () => startServer(context)),
-        vscode.commands.registerCommand("copilotBridge.stop", () => stopServer())
+        vscode.commands.registerCommand("copilotBridge.stop", stopServer)
     );
 
-    // Auto-start on activation
     startServer(context);
 }
 

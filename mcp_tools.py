@@ -25,6 +25,7 @@ from mcp_calls import (
     reply_comment,
     review_pull_request,
     cleanup_old_bot_comments,
+    set_runtime_auth,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,42 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 mcp = FastMCP("Confluence MCP Server")
+
+@mcp.tool(
+    description="""
+Set runtime credentials for Confluence and GitHub calls.
+
+Use this before other tools when requests should run under user-specific accounts.
+
+Args:
+- confluence_email (str, optional)
+- confluence_api_token (str, optional)
+- confluence_base_url (str, optional)
+- github_owner (str, optional)
+- github_token (str, optional)
+- github_base_url (str, optional)
+
+Returns:
+- dict: {"success": True, "data": {...}} if credentials were applied
+        {"success": False, "error": "..."} on failure
+"""
+)
+def set_runtime_auth_tool(
+    confluence_email: str = "",
+    confluence_api_token: str = "",
+    confluence_base_url: str = "",
+    github_owner: str = "",
+    github_token: str = "",
+    github_base_url: str = "",
+):
+    return set_runtime_auth(
+        confluence_email=confluence_email,
+        confluence_api_token=confluence_api_token,
+        confluence_base_url=confluence_base_url,
+        github_owner=github_owner,
+        github_token=github_token,
+        github_base_url=github_base_url,
+    )
 
 @mcp.tool(
     description="""

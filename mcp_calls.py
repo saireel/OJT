@@ -12,6 +12,48 @@ from github_reviewer import github_api
 syntax_actions = SyntaxActions(confluence_api)
 review_actions = ReviewActions(confluence_api, syntax_actions)
 
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return value[:4] + "*" * (len(value) - 8) + value[-4:]
+
+
+def set_runtime_auth(
+    confluence_email: str = "",
+    confluence_api_token: str = "",
+    confluence_base_url: str = "",
+    github_owner: str = "",
+    github_token: str = "",
+    github_base_url: str = "",
+) -> Dict[str, Any]:
+    """Apply per-request credentials to in-process API clients."""
+    try:
+        confluence_api.set_runtime_auth(
+            email=confluence_email,
+            api_token=confluence_api_token,
+            base_url=confluence_base_url,
+        )
+        github_api.set_runtime_auth(
+            owner=github_owner,
+            github_token=github_token,
+            base_url=github_base_url,
+        )
+        return {
+            "success": True,
+            "data": {
+                "confluence_email": confluence_email,
+                "confluence_api_token": _mask_secret(confluence_api_token),
+                "confluence_base_url": confluence_base_url,
+                "github_owner": github_owner,
+                "github_token": _mask_secret(github_token),
+                "github_base_url": github_base_url,
+            },
+        }
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to apply runtime auth: {exc}"}
+
 # Helpers
 def _extract_confluence_page_ids(source: str) -> List[str]:
     """Return a list of Confluence page IDs extracted from *source*.

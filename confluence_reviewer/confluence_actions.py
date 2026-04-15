@@ -38,6 +38,16 @@ class ConfluenceAPI:
         session.auth = (self.email, self.api_token)
         return session
 
+    def set_runtime_auth(self, email: str | None = None, api_token: str | None = None, base_url: str | None = None) -> None:
+        """Update active Confluence credentials for this runtime process."""
+        if isinstance(email, str) and email.strip():
+            self.email = email.strip()
+        if isinstance(api_token, str) and api_token.strip():
+            self.api_token = api_token.strip()
+        if isinstance(base_url, str) and base_url.strip():
+            self.base_url = base_url.strip().rstrip("/")
+        self.session.auth = (self.email, self.api_token)
+
     def _request(self, method: str, endpoint: str, **kwargs) -> Tuple[Optional[requests.Response], Optional[str]]:
         """Send a Confluence API request and return either the response or an error message."""
         url = f"{self.base_url}{endpoint}"

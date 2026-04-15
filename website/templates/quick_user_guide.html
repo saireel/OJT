@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quick User Guide - MunnAI</title>
+    <style>
+        :root {
+            --bg: linear-gradient(135deg, #ffe6f7 0%, #e0c3fc 100%);
+            --card: #fff8fc;
+            --text: #2d2d2d;
+            --muted: #6f6480;
+            --accent: #0066cc;
+            --border: #e0b3ff;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        .guide {
+            max-width: 900px;
+            margin: 0 auto;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: 0 8px 30px rgba(78, 30, 90, 0.12);
+            padding: 28px;
+        }
+
+        h1 {
+            margin-top: 0;
+            margin-bottom: 8px;
+            color: #5c1a48;
+        }
+
+        h2 {
+            margin-top: 24px;
+            margin-bottom: 8px;
+            color: #4f2f6d;
+            font-size: 1.15rem;
+        }
+
+        p, li {
+            line-height: 1.55;
+        }
+
+        .muted {
+            color: var(--muted);
+            margin-top: 0;
+        }
+
+        code, pre {
+            font-family: Consolas, 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+
+        pre {
+            background: #f4ecfa;
+            border: 1px solid #e3d2f4;
+            border-radius: 8px;
+            padding: 12px;
+            overflow-x: auto;
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-top: 18px;
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <main class="guide">
+        <h1>Quick User Guide</h1>
+        <p class="muted">How to run quick reviews and apply your own instruction checklist.</p>
+
+        <h2>1) Quick GitHub PR Review</h2>
+        <ol>
+            <li>Click <strong>GitHub PR Review</strong> from the sidebar.</li>
+            <li>Paste a PR link like <code>https://github.com/owner/repo/pull/123</code>.</li>
+            <li>Click <strong>Parse</strong>.</li>
+            <li>Select checklist items and expected outputs.</li>
+            <li>Click <strong>Start Review</strong>.</li>
+        </ol>
+        <p>The request is sent to chat and progress is streamed while the review runs.</p>
+
+        <h2>2) Quick Confluence Page Review</h2>
+        <ol>
+            <li>Click <strong>Confluence Page Review</strong> from the sidebar.</li>
+            <li>Paste a Confluence page link (full URL is okay) or page ID.</li>
+            <li>Click <strong>Parse</strong>.</li>
+            <li>Optional: select document type.</li>
+            <li>Select checklist items and expected outputs.</li>
+            <li>Click <strong>Start Review</strong>.</li>
+        </ol>
+
+        <h2>3) When You Have Your Own Instruction File</h2>
+        <p>There is no direct file upload button yet. Use one of these options:</p>
+        <ol>
+            <li>Paste the key instructions from your file into chat before starting review.</li>
+            <li>Keep a reusable local prompt template and paste it each time.</li>
+            <li>If instructions are in Confluence, paste that link first, then your PR/page link.</li>
+        </ol>
+
+        <p>Suggested instruction format:</p>
+        <pre>Use this checklist for my next review:
+- Validate naming conventions and consistency
+- Flag long lines and unclear comments
+- Report security-sensitive patterns
+Expected output:
+- Inline comments for exact lines
+- One summary comment with top risks</pre>
+
+        <h2>4) Quick Notes</h2>
+        <ul>
+            <li>Clicking outside a review panel closes it.</li>
+            <li>Use Ctrl+Enter in chat to send quickly.</li>
+            <li>If parsing fails, check your URL format first.</li>
+        </ul>
+
+        <a class="back-link" href="/">Back to MunnAI</a>
+    </main>
+</body>
+</html>
