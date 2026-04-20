@@ -327,6 +327,68 @@ def _fallback_links_from_history(history: list) -> tuple[list[str], list[dict]]:
         if page_ids or prs:
             return page_ids, prs
     return [], []
+
+
+_CHAT_LINK_METADATA_TTL_S = 45
+_CHAT_LINK_METADATA_CACHE: dict[tuple, tuple[float, dict]] = {}
+_CHAT_LINK_METADATA_CACHE_LOCK = threading.Lock()
+
+
+def _build_chat_link_cache_key(user_msg: str, history: list, history_window: int = 8) -> tuple:
+    recent_user_messages: list[str] = []
+    for entry in (history or [])[-history_window:]:
+        if isinstance(entry, dict) and entry.get("role") == "user":
+            msg = str(entry.get("text", "")).strip()
+            if msg:
+                recent_user_messages.append(msg[:1000])
+    return (str(user_msg or "").strip(), tuple(recent_user_messages))
+
+
+def _copy_pr_entries(prs: list[dict]) -> list[dict]:
+    copied: list[dict] = []
+    for pr in prs or []:
+        if isinstance(pr, dict):
+            copied.append(dict(pr))
+    return copied
+
+
+def _get_cached_chat_link_metadata(user_msg: str, history: list) -> tuple[dict, bool]:
+    """Return parsed link metadata with a short TTL cache for chat requests."""
+    cache_key = _build_chat_link_cache_key(user_msg, history)
+    now = time.time()
+    with _CHAT_LINK_METADATA_CACHE_LOCK:
+        entry = _CHAT_LINK_METADATA_CACHE.get(cache_key)
+        if entry and (now - entry[0]) < _CHAT_LINK_METADATA_TTL_S:
+            cached_payload = entry[1]
+            return {
+                "page_ids": list(cached_payload.get("page_ids", [])),
+                "prs": _copy_pr_entries(cached_payload.get("prs", [])),
+                "link_source": str(cached_payload.get("link_source", "current_message")),
+            }, True
+
+    page_ids = _extract_confluence_page_ids_from_text(user_msg)
+    prs = _extract_prs_from_text(user_msg)
+    link_source = "current_message"
+    if not page_ids and not prs:
+        hist_page_ids, hist_prs = _fallback_links_from_history(history)
+        if hist_page_ids or hist_prs:
+            page_ids = hist_page_ids
+            prs = hist_prs
+            link_source = "history_fallback"
+
+    payload = {
+        "page_ids": list(page_ids),
+        "prs": _copy_pr_entries(prs),
+        "link_source": link_source,
+    }
+    with _CHAT_LINK_METADATA_CACHE_LOCK:
+        _CHAT_LINK_METADATA_CACHE[cache_key] = (now, payload)
+
+    return {
+        "page_ids": list(payload["page_ids"]),
+        "prs": _copy_pr_entries(payload["prs"]),
+        "link_source": payload["link_source"],
+    }, False
 def _load_recent_feedback(limit: int = 20) -> str:
     """Load recent user feedback so the AI can learn from past false positives."""
     if not os.path.exists(FEEDBACK_FILE):
@@ -1008,12 +1070,101 @@ def _build_checklist_from_panel(panel_items: list[str]) -> list[dict]:
 
 # --- Cached PR Review Checklist ---
 # Built once and reused to avoid rebuilding on every request
+_PR_CHECKLIST_CACHE_TTL_S = 300
 _CACHED_PR_CHECKLIST = None
+_CACHED_PR_CHECKLIST_AT = 0.0
+_PR_CHECKLIST_CACHE_LOCK = threading.Lock()
+
+
 def _get_cached_pr_checklist():
-    global _CACHED_PR_CHECKLIST
-    if _CACHED_PR_CHECKLIST is None:
-        _CACHED_PR_CHECKLIST = _build_universal_pr_review_checklist()
-    return _CACHED_PR_CHECKLIST
+    global _CACHED_PR_CHECKLIST, _CACHED_PR_CHECKLIST_AT
+    now = time.time()
+    with _PR_CHECKLIST_CACHE_LOCK:
+        if (
+            _CACHED_PR_CHECKLIST is None
+            or (now - _CACHED_PR_CHECKLIST_AT) >= _PR_CHECKLIST_CACHE_TTL_S
+        ):
+            _CACHED_PR_CHECKLIST = _build_universal_pr_review_checklist()
+            _CACHED_PR_CHECKLIST_AT = now
+        return _CACHED_PR_CHECKLIST
+
+
+_MAX_CONCURRENT_REVIEWS = 3
+_REVIEW_EXECUTION_SEMAPHORE = threading.Semaphore(_MAX_CONCURRENT_REVIEWS)
+_REVIEW_INFLIGHT_LOCK = threading.Lock()
+_REVIEW_INFLIGHT: dict[tuple, dict] = {}
+
+
+def _make_review_coalesce_key(
+    repo: str,
+    pr_number: int,
+    checklist: list[dict] | None = None,
+    *,
+    skip_inline: bool = False,
+    skip_footer: bool = False,
+    max_inline_comments: int | None = None,
+    group_similar_inline: bool | None = None,
+    github_base_url: str | None = None,
+) -> tuple:
+    checklist_ids = tuple(
+        sorted(
+            str(item.get("id", "")).strip()
+            for item in (checklist or [])
+            if isinstance(item, dict)
+        )
+    )
+    normalized_repo = str(repo or "").strip().lower()
+    normalized_base_url = str(github_base_url or "").strip().lower()
+    normalized_max_inline = int(max_inline_comments) if max_inline_comments is not None else None
+    normalized_group = bool(group_similar_inline) if group_similar_inline is not None else None
+    return (
+        normalized_repo,
+        int(pr_number),
+        checklist_ids,
+        bool(skip_inline),
+        bool(skip_footer),
+        normalized_max_inline,
+        normalized_group,
+        normalized_base_url,
+    )
+
+
+def _run_review_with_coalescing(review_key: tuple, runner):
+    """Run one review per key at a time, sharing in-flight results with duplicate callers."""
+    waiter = False
+    with _REVIEW_INFLIGHT_LOCK:
+        inflight = _REVIEW_INFLIGHT.get(review_key)
+        if inflight is None:
+            inflight = {"event": threading.Event(), "result": None, "error": None}
+            _REVIEW_INFLIGHT[review_key] = inflight
+        else:
+            waiter = True
+
+    if waiter:
+        wait_started = time.time()
+        inflight["event"].wait()
+        waited_s = max(0.0, time.time() - wait_started)
+        if inflight.get("error") is not None:
+            raise RuntimeError(str(inflight["error"]))
+        return inflight.get("result"), True, waited_s
+
+    _REVIEW_EXECUTION_SEMAPHORE.acquire()
+    try:
+        result = runner()
+        inflight["result"] = result
+    except Exception as exc:
+        inflight["error"] = exc
+    finally:
+        _REVIEW_EXECUTION_SEMAPHORE.release()
+        inflight["event"].set()
+        with _REVIEW_INFLIGHT_LOCK:
+            current = _REVIEW_INFLIGHT.get(review_key)
+            if current is inflight:
+                _REVIEW_INFLIGHT.pop(review_key, None)
+
+    if inflight.get("error") is not None:
+        raise RuntimeError(str(inflight["error"]))
+    return inflight.get("result"), False, 0.0
 
 # --- Lightweight PR Review Prompt ---
 # Used when agent detects a PR review request to reduce Copilot latency
@@ -1153,7 +1304,7 @@ def _build_agent_prompt(
         + verification_reminder
         + f"\n\n[Agent step {step + 1}] What do you do next?"
     )
-def run_agent(user_msg: str, history: list, link_context: str) -> str:
+def run_agent(user_msg: str, history: list, link_context: str, request_meta: dict | None = None) -> str:
     """
     ReAct + Verify-Then-Continue agent loop.
     LLM -> Tool -> Observation -> Verify -> LLM -> ... -> FINAL_ANSWER
@@ -1167,6 +1318,117 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             role = "User" if entry.get("role") == "user" else "Assistant"
             parts.append(f"{role}: {entry.get('text', '')}")
         history_context = "Conversation history:\n" + "\n".join(parts) + "\n\n"
+    request_meta = request_meta or {}
+    page_ids = list(request_meta.get("page_ids") or [])
+    prs = list(request_meta.get("prs") or [])
+    review_type = str(request_meta.get("review_type") or "").strip().lower()
+    doc_type = str(request_meta.get("doc_type") or "").strip()
+    checklist_input = request_meta.get("checklist") or []
+    outputs = list(request_meta.get("outputs") or [])
+    confluence_checklist_page_id = str(request_meta.get("confluence_checklist_page_id") or "").strip()
+
+    if not page_ids:
+        page_ids = re.findall(r'page_id = "(\d+)"', link_context)
+    if not prs:
+        pr_matches = re.findall(r"PR: ([^/]+)/([^#]+)#(\d+)", link_context)
+        prs = [
+            {"owner": owner, "repo": repo, "pr_number": int(pr_num)}
+            for owner, repo, pr_num in pr_matches
+        ]
+
+    if checklist_input and isinstance(checklist_input, list) and checklist_input and isinstance(checklist_input[0], dict):
+        pr_checklist = checklist_input
+    elif checklist_input:
+        pr_checklist = _build_checklist_from_panel([str(item) for item in checklist_input])
+    else:
+        pr_checklist = _get_cached_pr_checklist()
+
+    wants_inline = any("inline" in str(item).lower() for item in outputs) if outputs else True
+    wants_combined_review = bool(
+        page_ids
+        and prs
+        and (
+            review_type in {"document and code", "code and document", "combined", "both", "document+code", "code+document"}
+            or "document and code" in user_msg.lower()
+            or "code and document" in user_msg.lower()
+            or "documentation and code" in user_msg.lower()
+            or doc_type
+            or checklist_input
+            or outputs
+        )
+    )
+
+    def _render_tool_summary(result: object, default_message: str) -> tuple[bool, str, list[str]]:
+        if not isinstance(result, dict):
+            return False, str(result) if result is not None else default_message, []
+        if not result.get("success"):
+            return False, result.get("error", default_message), []
+        data = result.get("data", {})
+        if not isinstance(data, dict):
+            return True, str(data) if data else default_message, []
+        summary = str(data.get("summary", "")).strip() or default_message
+        reviewed = data.get("reviewed_items", []) or []
+        reviewed = [str(item) for item in reviewed if str(item).strip()]
+        return True, summary, reviewed
+
+    # OPTIMIZATION: Detect combined document/code reviews early and run both tools directly.
+    if wants_combined_review:
+        print("[AGENT] Detected combined document/code review request - calling Confluence and PR tools directly", flush=True)
+        pr = prs[0]
+        page_id = str(page_ids[0])
+        repo_full = f"{pr['owner']}/{pr['repo']}"
+        skip_inline = not wants_inline
+
+        confluence_result = TOOL_REGISTRY["review_confluence_page_content"]({
+            "page_id": page_id,
+            "checklist_page_id": confluence_checklist_page_id,
+            "skip_inline": skip_inline,
+            "skip_footer": False,
+        })
+        pr_result = TOOL_REGISTRY["review_pull_request_tool"]({
+            "repo": repo_full,
+            "pr_number": int(pr["pr_number"]),
+            "checklist": pr_checklist,
+            "skip_inline": skip_inline,
+            "skip_footer": False,
+        })
+
+        confluence_ok, confluence_summary, confluence_reviewed = _render_tool_summary(
+            confluence_result,
+            f"Review comments and a footer summary have been posted to Confluence page {page_id}.",
+        )
+        pr_ok, pr_summary, pr_reviewed = _render_tool_summary(
+            pr_result,
+            f"Review comments and a footer summary have been posted to PR {repo_full}#{pr['pr_number']}.",
+        )
+
+        lines = [
+            f"Completed combined document/code review for {repo_full}#{pr['pr_number']} and Confluence page {page_id}.",
+        ]
+        if review_type:
+            lines.append(f"Review type: {review_type}")
+        elif doc_type:
+            lines.append(f"Document type: {doc_type}")
+        if checklist_input:
+            lines.append(f"Checklist items: {', '.join(str(item) for item in checklist_input)}")
+        if outputs:
+            lines.append(f"Expected outputs: {', '.join(str(item) for item in outputs)}")
+        lines.append("")
+        lines.append(f"Confluence page {page_id}:")
+        lines.append(f"- Status: {'success' if confluence_ok else 'failed'}")
+        if confluence_reviewed:
+            lines.append(f"- Reviewed: {', '.join(confluence_reviewed)}")
+        lines.append(f"- {confluence_summary}")
+        lines.append("")
+        lines.append(f"GitHub PR {repo_full}#{pr['pr_number']}:")
+        lines.append(f"- Status: {'success' if pr_ok else 'failed'}")
+        if pr_reviewed:
+            lines.append(f"- Reviewed: {', '.join(pr_reviewed)}")
+        lines.append(f"- {pr_summary}")
+        lines.append("")
+        lines.append("Footer summaries were posted to both the Confluence page and the PR.")
+        return "\n".join(lines)
+
     # OPTIMIZATION: Detect PR reviews early and call tool directly (skip LLM)
     is_pr_review = "PR:" in link_context and any(term in user_msg.lower() for term in ["review", "check", "audit", "inspect"])
     if is_pr_review:
@@ -1176,12 +1438,21 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
             owner, repo, pr_num = pr_matches[0]
             repo_full = f"{owner}/{repo}"
             checklist = _get_cached_pr_checklist()
+            review_key = _make_review_coalesce_key(
+                repo_full,
+                int(pr_num),
+                checklist=checklist,
+            )
+
+            def _invoke_direct_review():
+                return TOOL_REGISTRY["review_pull_request_tool"]({
+                    "repo": repo_full,
+                    "pr_number": int(pr_num),
+                    "checklist": checklist,
+                })
+
             started_at = time.time()
-            result = TOOL_REGISTRY["review_pull_request_tool"]({
-                "repo": repo_full,
-                "pr_number": int(pr_num),
-                "checklist": checklist,
-            })
+            result, reused_inflight, waited_s = _run_review_with_coalescing(review_key, _invoke_direct_review)
             elapsed_ms = int((time.time() - started_at) * 1000)
             elapsed_s = elapsed_ms / 1000
             if isinstance(result, dict) and result.get("success"):
@@ -1191,6 +1462,8 @@ def run_agent(user_msg: str, history: list, link_context: str) -> str:
                 lines = [
                     f"Completed PR review for {repo_full}#{pr_num} in {elapsed_s:.1f}s.",
                 ]
+                if reused_inflight:
+                    lines.append(f"Reused an in-flight review result (waited {waited_s:.1f}s).")
                 if reviewed:
                     lines.append(f"Reviewed: {', '.join(reviewed)}")
                 if summary:

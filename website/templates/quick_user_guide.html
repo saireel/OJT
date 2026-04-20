@@ -3,136 +3,253 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quick User Guide - MunnAI</title>
+    <title>User Guide - MunnAI</title>
     <style>
         :root {
-            --bg: linear-gradient(135deg, #ffe6f7 0%, #e0c3fc 100%);
-            --card: #fff8fc;
-            --text: #2d2d2d;
-            --muted: #6f6480;
-            --accent: #0066cc;
-            --border: #e0b3ff;
+            --ink: #1a1c23;
+            --muted: #5a6072;
+            --card: #ffffff;
+            --bg-a: #f8fbff;
+            --bg-b: #f6f1ff;
+            --line: #d7deeb;
+            --primary: #2254f4;
+            --primary-2: #7a36d6;
+            --accent-soft: #eef2ff;
         }
 
         * { box-sizing: border-box; }
 
         body {
             margin: 0;
-            font-family: 'Segoe UI', sans-serif;
-            background: var(--bg);
-            color: var(--text);
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(1200px 600px at 8% -20%, #dff2ff 0%, transparent 56%),
+                radial-gradient(1000px 520px at 95% -10%, #efe4ff 0%, transparent 58%),
+                linear-gradient(150deg, var(--bg-a) 0%, var(--bg-b) 100%);
             min-height: 100vh;
-            padding: 24px;
+            padding: 26px 16px 40px;
         }
 
-        .guide {
-            max-width: 900px;
+        .guide-shell {
+            max-width: 1040px;
             margin: 0 auto;
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            box-shadow: 0 8px 30px rgba(78, 30, 90, 0.12);
-            padding: 28px;
+            display: grid;
+            gap: 16px;
         }
 
-        h1 {
-            margin-top: 0;
-            margin-bottom: 8px;
-            color: #5c1a48;
+        .hero {
+            background: linear-gradient(135deg, #ffffff 0%, #f8f4ff 100%);
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            padding: 22px;
+            box-shadow: 0 18px 34px rgba(20, 26, 52, 0.12);
         }
 
-        h2 {
-            margin-top: 24px;
-            margin-bottom: 8px;
-            color: #4f2f6d;
-            font-size: 1.15rem;
+        .hero h1 {
+            margin: 0 0 8px;
+            font-size: clamp(1.5rem, 2.7vw, 2.1rem);
+            letter-spacing: -0.02em;
         }
 
-        p, li {
-            line-height: 1.55;
-        }
-
-        .muted {
+        .hero p {
+            margin: 0;
             color: var(--muted);
-            margin-top: 0;
+            max-width: 760px;
+            line-height: 1.6;
         }
 
-        code, pre {
-            font-family: Consolas, 'Courier New', monospace;
+        .hero-actions {
+            margin-top: 14px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            border: 1px solid transparent;
+            padding: 10px 14px;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .btn.primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-2));
+            color: #fff;
+        }
+
+        .btn.secondary {
+            background: #fff;
+            border-color: var(--line);
+            color: var(--ink);
+        }
+
+        .feature-grid {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .feature-card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+        }
+
+        .feature-card h2 {
+            margin: 0 0 6px;
+            font-size: 1rem;
+        }
+
+        .feature-card p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .main-grid {
+            display: grid;
+            gap: 16px;
+            grid-template-columns: 1.5fr 1fr;
+        }
+
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 18px;
+            box-shadow: 0 10px 24px rgba(15, 20, 42, 0.08);
+        }
+
+        .panel h3 {
+            margin: 0 0 10px;
+            font-size: 1.05rem;
+        }
+
+        .panel p,
+        .panel li {
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .flow-list {
+            margin: 0;
+            padding-left: 18px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .tip {
+            background: var(--accent-soft);
+            border: 1px dashed #b9c8f6;
+            border-radius: 12px;
+            padding: 10px 12px;
             font-size: 0.9rem;
         }
 
         pre {
-            background: #f4ecfa;
-            border: 1px solid #e3d2f4;
-            border-radius: 8px;
+            margin: 0;
+            background: #0e1528;
+            color: #f3f6ff;
+            border-radius: 12px;
+            border: 1px solid #273659;
             padding: 12px;
             overflow-x: auto;
+            font-size: 0.83rem;
+            line-height: 1.45;
         }
 
-        .back-link {
-            display: inline-block;
-            margin-top: 18px;
-            color: var(--accent);
-            text-decoration: none;
-            font-weight: 600;
+        @media (max-width: 940px) {
+            .feature-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
         }
 
-        .back-link:hover {
-            text-decoration: underline;
+        @media (max-width: 620px) {
+            body { padding: 16px 10px 28px; }
+            .hero, .panel { padding: 14px; }
+            .feature-grid { grid-template-columns: 1fr; }
+            .hero-actions { flex-direction: column; }
+            .btn { width: 100%; }
         }
     </style>
 </head>
 <body>
-    <main class="guide">
-        <h1>Quick User Guide</h1>
-        <p class="muted">How to run quick reviews and apply your own instruction checklist.</p>
+    <main class="guide-shell">
+        <section class="hero">
+            <h1>MunnAI User Guide</h1>
+            <p>Run fast, structured reviews for GitHub pull requests and Confluence pages, then publish actionable comments with less manual effort.</p>
+            <div class="hero-actions">
+                <a class="btn primary" href="/">Launch MunnAI</a>
+                <a class="btn secondary" href="/">Back to Workspace</a>
+            </div>
+        </section>
 
-        <h2>1) Quick GitHub PR Review</h2>
-        <ol>
-            <li>Click <strong>GitHub PR Review</strong> from the sidebar.</li>
-            <li>Paste a PR link like <code>https://github.com/owner/repo/pull/123</code>.</li>
-            <li>Click <strong>Parse</strong>.</li>
-            <li>Select checklist items and expected outputs.</li>
-            <li>Click <strong>Start Review</strong>.</li>
-        </ol>
-        <p>The request is sent to chat and progress is streamed while the review runs.</p>
+        <section class="feature-grid">
+            <article class="feature-card">
+                <h2>PR Review Automation</h2>
+                <p>Parse PR links, inspect changed files, and run checklist-driven quality checks quickly.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Confluence Content Review</h2>
+                <p>Review pages for readability, grammar, and structure, with inline and footer outputs.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Runtime Credentials</h2>
+                <p>Configure per-user GitHub and Confluence credentials in Account Setup with token visibility toggles.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Live Progress Stream</h2>
+                <p>Track each review step in real time from request start to completion.</p>
+            </article>
+        </section>
 
-        <h2>2) Quick Confluence Page Review</h2>
-        <ol>
-            <li>Click <strong>Confluence Page Review</strong> from the sidebar.</li>
-            <li>Paste a Confluence page link (full URL is okay) or page ID.</li>
-            <li>Click <strong>Parse</strong>.</li>
-            <li>Optional: select document type.</li>
-            <li>Select checklist items and expected outputs.</li>
-            <li>Click <strong>Start Review</strong>.</li>
-        </ol>
+        <section class="main-grid">
+            <article class="panel">
+                <h3>Recommended Workflow</h3>
+                <ol class="flow-list">
+                    <li>Open <strong>Account Setup</strong> and fill GitHub owner/token plus Confluence email/token.</li>
+                    <li>Choose <strong>GitHub PR Review</strong> or <strong>Confluence Page Review</strong> from the sidebar.</li>
+                    <li>Paste link or page ID, then click <strong>Parse</strong> to validate input.</li>
+                    <li>Select checklist rules and expected outputs.</li>
+                    <li>Start review and monitor streamed progress in chat.</li>
+                </ol>
 
-        <h2>3) When You Have Your Own Instruction File</h2>
-        <p>There is no direct file upload button yet. Use one of these options:</p>
-        <ol>
-            <li>Paste the key instructions from your file into chat before starting review.</li>
-            <li>Keep a reusable local prompt template and paste it each time.</li>
-            <li>If instructions are in Confluence, paste that link first, then your PR/page link.</li>
-        </ol>
+                <h3>Custom Instructions</h3>
+                <p>For now, include your own rules directly in chat before launching a review.</p>
+                <div class="tip">Tip: Keep your reusable checklist prompt in a local note, then paste it when needed.</div>
+            </article>
 
-        <p>Suggested instruction format:</p>
-        <pre>Use this checklist for my next review:
-- Validate naming conventions and consistency
+            <article class="panel">
+                <h3>Prompt Template</h3>
+                <pre>Use this checklist for my next review:
+- Validate naming consistency
 - Flag long lines and unclear comments
 - Report security-sensitive patterns
 Expected output:
 - Inline comments for exact lines
 - One summary comment with top risks</pre>
 
-        <h2>4) Quick Notes</h2>
-        <ul>
-            <li>Clicking outside a review panel closes it.</li>
-            <li>Use Ctrl+Enter in chat to send quickly.</li>
-            <li>If parsing fails, check your URL format first.</li>
-        </ul>
-
-        <a class="back-link" href="/">Back to MunnAI</a>
+                <h3 style="margin-top:14px;">Fast Tips</h3>
+                <ul class="flow-list">
+                    <li>Use Ctrl+Enter to send chat messages quickly.</li>
+                    <li>Click outside a panel or modal to close it.</li>
+                    <li>If parsing fails, verify link format first.</li>
+                </ul>
+            </article>
+        </section>
     </main>
 </body>
 </html>

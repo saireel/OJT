@@ -7,6 +7,7 @@ import re
 
 import requests
 import config
+import time
 from requests.exceptions import HTTPError
 
 class GitHubActions:
@@ -40,6 +41,8 @@ class GitHubActions:
             self._last_pr_lookup_error = None
             # In-memory caches to avoid redundant GitHub API calls during a review
             self._sha_cache = {}       # (repo, pr_number) -> (base_sha, head_sha)
+            self._pr_title_cache = {}   # (repo, pr_number) -> title
+            self._pr_files_cache = {}   # (repo, pr_number) -> (timestamp, [file_objects])
             self._file_content_cache = {}  # (repo, file_path, ref) -> content_str
 
     def _repo_path(self, repo: str) -> str:
@@ -62,6 +65,11 @@ class GitHubActions:
                 self._base_url = base_url.strip().rstrip("/")
             if self._github_token:
                 self._headers["Authorization"] = f"Bearer {self._github_token}"
+            # Credentials or API base changed: invalidate request caches.
+            self._sha_cache.clear()
+            self._pr_title_cache.clear()
+            self._pr_files_cache.clear()
+            self._file_content_cache.clear()
 
     def _request(self, method: str, url: str,
                      data: dict | None = None,
@@ -82,7 +90,7 @@ class GitHubActions:
             # JSON body (data), and query parameters (params).
             response = requests.request(method=method, url=url,
                                         headers=self._headers,
-                                        json=data, params=params,)
+                                        json=data, params=params, timeout=20)
             try:
                 # Raise HTTPError if response is 4xx or 5xx.
                 response.raise_for_status()
@@ -204,6 +212,11 @@ class GitHubActions:
             :param pr_number: Pull request number.
             :return:          A list of file JSON objects (may be empty).
             """
+            cache_key = (repo, pr_number)
+            cached_entry = self._pr_files_cache.get(cache_key)
+            if cached_entry and (time.time() - cached_entry[0]) < 45:
+                return cached_entry[1]
+
             url = (
                 f"{self._base_url}/repos/{self._repo_path(repo)}/pulls/{pr_number}/files"
             )
@@ -232,6 +245,7 @@ class GitHubActions:
                     f"(additions: {f['additions']}, deletions: {f['deletions']})"
                 )
             # Return the full file objects so the UI can show filenames and stats.
+            self._pr_files_cache[cache_key] = (time.time(), all_files)
             return all_files
 
     def get_base_and_head_sha(self, repo: str, pr_number: int):
@@ -258,8 +272,9 @@ class GitHubActions:
 
                 if r.status_code == 401:
                     self._last_pr_lookup_error = (
-                        "GitHub authentication failed (401 Bad credentials). "
-                        "Update GITHUB_TOKEN and restart the MCP server/web app."
+                        "User-side configuration/authentication error: GitHub authentication failed "
+                        "(401 Bad credentials). The token configured in GITHUB_TOKEN is invalid, expired, "
+                        "or revoked. Generate a new token, update GITHUB_TOKEN, and restart the MCP server/web app."
                     )
                 elif r.status_code == 403 and "rate limit" in api_message.lower():
                     self._last_pr_lookup_error = (
@@ -267,7 +282,8 @@ class GitHubActions:
                     )
                 elif r.status_code == 404:
                     self._last_pr_lookup_error = (
-                        "PR not found or token has no access to this repository (404)."
+                        "User-side access/configuration error: PR not found or the configured token has no access "
+                        "to this repository (404). Verify repo owner/name and token repository permissions."
                     )
                 else:
                     suffix = f": {api_message}" if api_message else ""
@@ -282,7 +298,12 @@ class GitHubActions:
             base_sha = pr["base"]["sha"]   # old version
             head_sha = pr["head"]["sha"]   # new version
             self._sha_cache[cache_key] = (base_sha, head_sha)
+            self._pr_title_cache[cache_key] = str(pr.get("title", "")).strip()
             return base_sha, head_sha
+
+    def get_cached_pr_title(self, repo: str, pr_number: int) -> str:
+            """Return a cached PR title when available; empty string otherwise."""
+            return self._pr_title_cache.get((repo, pr_number), "")
 
     def get_file_content_at_ref(self, repo: str, file_path: str, ref: str):
             """

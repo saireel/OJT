@@ -487,13 +487,21 @@ def reply_comment_tool(repo: str, pr_number: int, comment_id: int, reply_text: s
           ]
           result = review_pull_request_tool("my-repo", 42, checklist)
           """)
-def review_pull_request_tool(repo: str, pr_number: int, checklist: list, skip_inline: bool = False, skip_footer: bool = False):
+def review_pull_request_tool(repo: str, pr_number: int, checklist: list, skip_inline: bool = False, skip_footer: bool = False, max_inline_comments: int = 6, group_similar_inline: bool = True):
     """
     Executes a comprehensive pull request review based on the provided checklist.
     skip_inline: If True, skip posting inline comments on specific lines.
     skip_footer: If True, skip posting the footer summary comment.
     """
-    return review_pull_request(repo, pr_number, checklist, skip_inline=skip_inline, skip_footer=skip_footer)
+    return review_pull_request(
+        repo,
+        pr_number,
+        checklist,
+        skip_inline=skip_inline,
+        skip_footer=skip_footer,
+        max_inline_comments=max_inline_comments,
+        group_similar_inline=group_similar_inline,
+    )
 
 @mcp.tool(description=
           """

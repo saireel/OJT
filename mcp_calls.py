@@ -12,6 +12,9 @@ from github_reviewer import github_api
 syntax_actions = SyntaxActions(confluence_api)
 review_actions = ReviewActions(confluence_api, syntax_actions)
 
+STRICT_HIGH_CONFIDENCE_MODE = True
+STRICT_INLINE_COMMENT_LIMIT = 12
+
 def _mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -224,7 +227,7 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
         }
 
     if len(page_ids) == 1:
-        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer)
+        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id, skip_inline=False, skip_footer=False)
         if result is not None:
             return {"success": True, "data": result}
         return {"success": False, "error": error or "Failed to review confluence page"}
@@ -232,7 +235,7 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
     reviewed = []
     failed = []
     for pid in page_ids:
-        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer)
+        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id, skip_inline=False, skip_footer=False)
         if result is not None:
             reviewed.append(result)
         else:
@@ -358,9 +361,18 @@ def reply_comment(repo: str, pr_number: int, comment_id: int, reply_text: str):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def review_pull_request(repo: str, pr_number: int, checklist: list, skip_inline: bool = False, skip_footer: bool = False):
+def review_pull_request(repo: str, pr_number: int, checklist: list, skip_inline: bool = False, skip_footer: bool = False, max_inline_comments: int = 6, group_similar_inline: bool = True):
     try:
-        result = github_api.review_pull_request(repo, pr_number, checklist, skip_inline=skip_inline, skip_footer=skip_footer)
+        # High-confidence mode is enforced for all PR reviews.
+        result = github_api.review_pull_request(
+            repo,
+            pr_number,
+            checklist,
+            skip_inline=False,
+            skip_footer=False,
+            max_inline_comments=STRICT_INLINE_COMMENT_LIMIT,
+            group_similar_inline=True,
+        )
         # Ensure summary is always included in response
         if result and isinstance(result, dict):
             return {"success": True, "data": result}

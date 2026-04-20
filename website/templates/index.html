@@ -14,13 +14,10 @@
         </div>
         <div class="sidebar-section">
             <h3>Quick Access</h3>
-            <button class="sidebar-btn" id="pr-review-btn">
+            <button class="sidebar-btn" id="quick-review-btn">
                 <svg class="sidebar-btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
-                GitHub PR Review
-            </button>
-            <button class="sidebar-btn" id="confluence-review-btn">
-                <svg class="sidebar-btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M1.146 14.2c-.087.14-.048.326.092.413l2.146 1.34c.14.087.326.048.413-.093.796-1.26 1.7-2.87 3.637-2.87 1.834 0 2.5 1.063 4.544 1.063 2.734 0 4.022-2.093 4.022-2.093.087-.14.048-.326-.092-.413L13.762 10.2c-.14-.087-.326-.048-.413.093-.796 1.26-1.3 1.707-2.783 1.707-1.834 0-2.9-1.063-4.544-1.063-2.734 0-3.88 2.003-4.876 3.263zM1.146 7.2c-.087.14-.048.326.092.413l2.146 1.34c.14.087.326.048.413-.093C4.593 7.6 5.497 5.99 7.434 5.99c1.834 0 2.5 1.063 4.544 1.063 2.734 0 4.022-2.093 4.022-2.093.087-.14.048-.326-.092-.413L13.762 3.2c-.14-.087-.326-.048-.413.093-.796 1.26-1.3 1.707-2.783 1.707-1.834 0-2.9-1.063-4.544-1.063C3.288 3.937 2.142 5.94 1.146 7.2z"></path></svg>
-                Confluence Page Review
+                Quick Review
+            <button class="sidebar-btn" id="pr-review-btn" style="display:none;">GitHub PR Review</button>
             </button>
         </div>
         <div class="sidebar-section">
@@ -53,11 +50,50 @@
     </div>
     </div>
 
+
+    <div class="help-modal" id="quick-review-modal">
+        <div class="help-modal-content auth-settings-content quick-review-modal-content">
+            <div class="help-modal-header">
+                <div>
+                    <h2>Quick Review</h2>
+                    <p class="quick-review-subtitle">Choose the review mode, then open the matching panel.</p>
+                </div>
+                <button class="help-modal-close" id="quick-review-close">&times;</button>
+            </div>
+            <div class="help-modal-body">
+                <div class="review-mode-grid">
+                    <label class="review-mode-card" for="quick-review-combined">
+                        <input type="radio" name="quick-review-mode" id="quick-review-combined" value="combined" checked>
+                        <span class="review-mode-card-title">Review Confluence Page with a Pull Request</span>
+                        <span class="review-mode-card-copy">Use both the page context and the PR checklist.</span>
+                    </label>
+                    <label class="review-mode-card" for="quick-review-confluence">
+                        <input type="radio" name="quick-review-mode" id="quick-review-confluence" value="confluence">
+                        <span class="review-mode-card-title">Confluence page review</span>
+                        <span class="review-mode-card-copy">Focus on page quality, structure, and inline comments.</span>
+                    </label>
+                    <label class="review-mode-card" for="quick-review-pr">
+                        <input type="radio" name="quick-review-mode" id="quick-review-pr" value="pr">
+                        <span class="review-mode-card-title">GitHub PR review</span>
+                        <span class="review-mode-card-copy">Use the PR checklist and review comments only.</span>
+                    </label>
+                </div>
+            </div>
+            <div class="panel-actions">
+                <button class="btn-primary" id="quick-review-continue-btn">Continue</button>
+                <button class="btn-secondary" id="quick-review-cancel-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- PR Review Panel (modal overlay) -->
     <div class="pr-review-panel" id="pr-review-panel">
         <div class="panel-modal">
-            <div class="panel-header">
-                <h2>GitHub PR Review</h2>
+            <div class="panel-header review-panel-header">
+                <div class="panel-header-title-group">
+                    <h2 id="pr-review-title">GitHub PR Review</h2>
+                    <button type="button" class="btn-secondary btn-small" id="pr-change-mode-btn">Change mode</button>
+                </div>
                 <button class="close-btn" id="pr-review-close">&times;</button>
             </div>
             <div class="panel-content">
@@ -210,6 +246,25 @@
                         <button type="button" id="add-output-btn" class="add-item-btn">+ Add</button>
                     </div>
                 </div>
+
+                <div class="form-group review-tuning">
+                    <label>Review Speed And Inline Noise Controls</label>
+                    <label class="check-item tuning-item">
+                        <input type="checkbox" id="fast-mode-toggle">
+                        <span>Fast mode (caps inline comments and prefers grouped findings)</span>
+                    </label>
+                    <div class="tuning-grid">
+                        <label class="tuning-field" for="max-inline-comments">Max inline comments per run
+                            <input type="number" id="max-inline-comments" min="1" max="25" value="6">
+                        </label>
+                        <label class="check-item tuning-item">
+                            <input type="checkbox" id="group-similar-inline" checked>
+                            <span>Group similar inline issues</span>
+                        </label>
+                    </div>
+                    <p class="form-hint">Fast mode auto-lowers max inline comments to 4 and forces grouped inline findings.</p>
+                </div>
+
                 <div class="panel-actions">
                     <button class="btn-primary" id="start-review-btn">Start Review</button>
                     <button class="btn-secondary" id="back-to-chat-btn">Back to Chat</button>
@@ -221,8 +276,11 @@
     <!-- Confluence Review Panel (modal overlay) -->
     <div class="pr-review-panel" id="confluence-review-panel">
         <div class="panel-modal">
-            <div class="panel-header">
-                <h2>Confluence Page Review</h2>
+            <div class="panel-header review-panel-header">
+                <div class="panel-header-title-group">
+                    <h2 id="confluence-review-title">Review Confluence Page with a Pull Request</h2>
+                    <button type="button" class="btn-secondary btn-small" id="confluence-change-mode-btn">Change mode</button>
+                </div>
                 <button class="close-btn" id="confluence-review-close">&times;</button>
             </div>
             <div class="panel-content">
@@ -237,6 +295,14 @@
                         Page: <span id="confluence-display">-</span>
                     </div>
                 </div>
+                <div class="form-group" id="confluence-pr-link-group">
+                    <label>GitHub PR URL or ID</label>
+                    <div class="input-group">
+                        <input type="text" id="confluence-pr-link-input" placeholder="https://github.com/owner/repo/pull/123 or owner/repo#123" class="pr-link-input">
+                    </div>
+                    <p class="form-hint">Add the PR that should be reviewed against the documentation.</p>
+                </div>
+
 
                 <!-- Document Type -->
                 <div class="form-group">
@@ -346,8 +412,10 @@
                     </div>
                 </div>
 
+                <button id="start-confluence-pr-review-btn" style="display:none;">PR Review</button>
+                <button id="start-confluence-pr-only-btn" style="display:none;">PR Only</button>
                 <div class="panel-actions">
-                    <button class="btn-primary" id="start-confluence-review-btn">Start Review</button>
+                    <button class="btn-primary" id="start-confluence-review-btn">Run Review</button>
                     <button class="btn-secondary" id="confluence-back-to-chat-btn">Back to Chat</button>
                 </div>
             </div>
@@ -356,33 +424,61 @@
 
     <!-- Account Setup Modal -->
     <div class="help-modal" id="auth-settings-modal">
-        <div class="help-modal-content">
+        <div class="help-modal-content auth-settings-content">
             <div class="help-modal-header">
                 <h2>Account Setup</h2>
                 <button class="help-modal-close" id="auth-settings-close">&times;</button>
             </div>
-            <div class="help-modal-body" id="auth-settings-view">
-                <div>
-                    <label>Confluence Token:</label>
-                    <span id="view-confluence-token">************</span>
+
+            <div class="help-modal-body auth-settings-body auth-view-grid" id="auth-settings-view">
+                <p class="auth-intro">Manage runtime credentials used for GitHub and Confluence reviews.</p>
+                <div class="auth-display-row">
+                    <label>Confluence Email</label>
+                    <span id="view-confluence-email" class="plain-value">Not set</span>
                 </div>
-                <div>
-                    <label>GitHub Token:</label>
-                    <span id="view-github-token">************</span>
+                <div class="auth-display-row">
+                    <label>Confluence API Token</label>
+                    <span id="view-confluence-token" class="masked-value">Not set</span>
                 </div>
-                <button id="edit-auth-btn" class="btn-secondary">Edit</button>
+                <div class="auth-display-row">
+                    <label>GitHub Owner</label>
+                    <span id="view-github-owner" class="plain-value">Not set</span>
+                </div>
+                <div class="auth-display-row">
+                    <label>GitHub Token</label>
+                    <span id="view-github-token" class="masked-value">Not set</span>
+                </div>
+                <div class="auth-actions auth-actions-split">
+                    <button id="clear-auth-btn" class="btn-secondary">Clear</button>
+                    <button id="edit-auth-btn" class="btn-primary">Edit Credentials</button>
+                </div>
             </div>
-            <div class="help-modal-body" id="auth-settings-edit" style="display:none;">
-                <div>
-                    <label for="edit-confluence-token">Confluence Token:</label>
-                    <input type="password" id="edit-confluence-token" placeholder="Enter new token">
+
+            <div class="help-modal-body auth-settings-body" id="auth-settings-edit" style="display:none;">
+                <div class="auth-form-grid">
+                    <label for="edit-confluence-email">Confluence Email</label>
+                    <input type="email" id="edit-confluence-email" placeholder="name@example.com" autocomplete="email">
+
+                    <label for="edit-confluence-token">Confluence API Token</label>
+                    <div class="token-input-wrap">
+                        <input type="password" id="edit-confluence-token" placeholder="Enter Confluence API token" autocomplete="off" spellcheck="false">
+                        <button type="button" class="token-toggle" data-target="edit-confluence-token" aria-pressed="false">Show</button>
+                    </div>
+
+                    <label for="edit-github-owner">GitHub Owner</label>
+                    <input type="text" id="edit-github-owner" placeholder="org-or-username" autocomplete="username" spellcheck="false">
+
+                    <label for="edit-github-token">GitHub Token</label>
+                    <div class="token-input-wrap">
+                        <input type="password" id="edit-github-token" placeholder="Enter GitHub token" autocomplete="off" spellcheck="false">
+                        <button type="button" class="token-toggle" data-target="edit-github-token" aria-pressed="false">Show</button>
+                    </div>
                 </div>
-                <div>
-                    <label for="edit-github-token">GitHub Token:</label>
-                    <input type="password" id="edit-github-token" placeholder="Enter new token">
+                <p class="form-hint">Credentials are stored in your browser for this app and sent as runtime auth with requests.</p>
+                <div class="auth-actions">
+                    <button id="cancel-auth-btn" class="btn-secondary">Cancel</button>
+                    <button id="save-auth-btn" class="btn-primary">Save Credentials</button>
                 </div>
-                <button id="save-auth-btn" class="btn-primary">Save</button>
-                <button id="cancel-auth-btn" class="btn-secondary">Cancel</button>
             </div>
         </div>
     </div>
@@ -395,40 +491,69 @@
                 <button class="help-modal-close" id="help-modal-close">&times;</button>
             </div>
             <div class="help-modal-body">
-                <h3>1. Quick GitHub PR Review</h3>
+                <p class="help-intro">MunnAI helps you run guided code and content reviews with structured outputs, inline comments, and summary insights.</p>
+
+                <div class="help-feature-grid">
+                    <article class="help-feature-card">
+                        <h3>GitHub PR Review</h3>
+                        <ul>
+                            <li>Parse GitHub PR links and inspect changed files.</li>
+                            <li>Run checklist-based review rules in one flow.</li>
+                            <li>Produce inline comments, file-level notes, and summary feedback.</li>
+                        </ul>
+                    </article>
+                    <article class="help-feature-card">
+                        <h3>Confluence Review</h3>
+                        <ul>
+                            <li>Review pages by URL or page ID.</li>
+                            <li>Detect grammar, readability, and structure issues.</li>
+                            <li>Post inline and footer comments with optional rewrite suggestions.</li>
+                        </ul>
+                    </article>
+                    <article class="help-feature-card">
+                        <h3>Account Setup</h3>
+                        <ul>
+                            <li>Store GitHub owner/token and Confluence email/token.</li>
+                            <li>Use show/hide controls for token fields while editing.</li>
+                            <li>Send credentials as runtime auth for each request.</li>
+                        </ul>
+                    </article>
+                    <article class="help-feature-card">
+                        <h3>Live Progress</h3>
+                        <ul>
+                            <li>See real-time review steps in the chat stream.</li>
+                            <li>Auto-fallback to direct requests if streaming is unavailable.</li>
+                            <li>Track final status in the request hint area.</li>
+                        </ul>
+                    </article>
+                </div>
+
+                <h3>Fast Workflow</h3>
                 <ol>
-                    <li>Click <strong>GitHub PR Review</strong> from the sidebar.</li>
-                    <li>Paste a PR link like <code>https://github.com/owner/repo/pull/123</code>.</li>
-                    <li>Click <strong>Parse</strong>.</li>
-                    <li>Select checklist items and expected outputs.</li>
-                    <li>Click <strong>Start Review</strong>.</li>
-                </ol>
-                <p>The request is sent to chat and progress is streamed while the review runs.</p>
-
-                <h3>2. Quick Confluence Page Review</h3>
-                <ol>
-                    <li>Click <strong>Confluence Page Review</strong> from the sidebar.</li>
-                    <li>Paste a Confluence page URL or page ID.</li>
-                    <li>Click <strong>Parse</strong>.</li>
-                    <li>Select checklist items and expected outputs.</li>
-                    <li>Click <strong>Start Review</strong>.</li>
+                    <li>Configure credentials in <strong>Account Setup</strong>.</li>
+                    <li>Choose <strong>GitHub PR Review</strong> or <strong>Confluence Page Review</strong>.</li>
+                    <li>Parse the link, pick checklist items, and start the review.</li>
+                    <li>Watch live progress and copy outcomes from chat.</li>
                 </ol>
 
-                <h3>3. Using Your Own Instructions</h3>
-                <p>No file upload yet. Options:</p>
-                <ul>
-                    <li>Paste key instructions into chat before starting review.</li>
-                    <li>Keep a reusable prompt template locally.</li>
-                    <li>Paste Confluence link first, then PR/page link.</li>
-                </ul>
-
-                <h3>4. Quick Tips</h3>
-                <ul>
-                    <li>Clicking outside a panel closes it.</li>
-                    <li>Use Ctrl+Enter in chat to send quickly.</li>
-                    <li>Check URL format if parsing fails.</li>
-                </ul>
+                <div class="help-cta-row">
+                    <button class="btn-primary" id="start-tour-btn" type="button">Start Interactive Tour</button>
+                    <a class="btn-secondary help-guide-link" href="/quick-user-guide">Open Full User Guide</a>
+                </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Progress Panel for Reviews -->
+    <div id="review-progress-panel" class="review-progress-panel" style="display: none;">
+        <div class="progress-header">
+            <span class="progress-spinner">⏳</span>
+            <span class="progress-title">Review in progress...</span>
+            <span class="progress-time">(0s elapsed)</span>
+            <button class="progress-toggle">▼</button>
+        </div>
+        <div class="progress-details" style="display: none;">
+            <div id="progress-log" class="progress-log"></div>
         </div>
     </div>
 

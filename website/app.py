@@ -14,12 +14,55 @@ _fallback_links_from_history = _logic._fallback_links_from_history
 _try_fast_confluence_spelling_review = _logic._try_fast_confluence_spelling_review
 run_agent = _logic.run_agent
 normalize_user_auth = _logic.normalize_user_auth
+
+
+_CONFLUENCE_PANEL_CHECK_MAP = {
+    "spelling & grammar": "grammar",
+    "repeated words": "repeated_word",
+    "long sentences (readability)": "long_sentence",
+    "long paragraphs": "long_paragraph",
+    "page structure & headings": "structure",
+    "table of contents present": "structure",
+    "broken / missing links": "citation",
+    "outdated information": "statistics_validation",
+    "consistent terminology": "consistency_checks",
+    "consistent formatting": "table_validation",
+    "proper use of code blocks": "structure",
+    "missing sections / incomplete content": "structure",
+}
+
+
+def _resolve_confluence_checklist_page_id(checklist):
+    selected_ids = []
+    seen = set()
+    for raw in (checklist or []):
+        label = str(raw).strip().lower()
+        if not label:
+            continue
+        check_id = _CONFLUENCE_PANEL_CHECK_MAP.get(label)
+        if not check_id or check_id in seen:
+            continue
+        selected_ids.append(check_id)
+        seen.add(check_id)
+
+    if not selected_ids:
+        return ""
+
+    if selected_ids == ["grammar"]:
+        return "__GRAMMAR_ONLY__"
+
+    return "__CUSTOM_CHECKS__:" + ",".join(selected_ids)
+
+
 set_active_user_auth = _logic.set_active_user_auth
 clear_active_user_auth = _logic.clear_active_user_auth
 FEEDBACK_FILE = _logic.FEEDBACK_FILE
 _build_universal_pr_review_checklist = _logic._build_universal_pr_review_checklist
 _build_checklist_from_panel = _logic._build_checklist_from_panel
 _get_cached_pr_checklist = _logic._get_cached_pr_checklist
+_get_cached_chat_link_metadata = _logic._get_cached_chat_link_metadata
+_make_review_coalesce_key = _logic._make_review_coalesce_key
+_run_review_with_coalescing = _logic._run_review_with_coalescing
 _clean_review_line = _logic._clean_review_line
 TOOL_REGISTRY = _logic.TOOL_REGISTRY
 mcp_client = _logic.mcp_client
@@ -29,6 +72,57 @@ threading = _logic.threading
 time = _logic.time
 
 app = Flask(__name__)
+
+
+def _try_fast_smalltalk_response(user_msg: str) -> str | None:
+    """Return an immediate local response for simple greetings to avoid LLM latency."""
+    if not user_msg:
+        return None
+    normalized = re.sub(r"[^a-z0-9\s?!.,]", "", user_msg.lower()).strip()
+    quick_greetings = {
+        "hi", "hello", "hey", "yo", "hii", "hey there", "hello there", "hi there"
+    }
+    if normalized in quick_greetings:
+        return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed."
+    if normalized in {"thanks", "thank you", "ty", "tnx"}:
+        return "You are welcome. I can help with PR reviews, Confluence checks, and account setup too."
+    if normalized in {"ok", "okay", "k", "cool", "nice"}:
+        return "Great. Send the next task when you are ready."
+    return None
+
+
+_PR_FILES_CACHE_TTL_S = 45
+_PR_FILES_CACHE: dict[tuple, tuple[float, list]] = {}
+_PR_FILES_CACHE_LOCK = threading.Lock()
+_DEFERRED_CHECK_IDS = {"spelling_grammar", "repeated_words", "cross_file_consistency"}
+_DEFAULT_INLINE_COMMENT_LIMIT = 6
+_STRICT_INLINE_COMMENT_LIMIT = 12
+
+
+def _get_cached_pr_files(repo_full: str, pr_num: int, user_auth: dict, github_base_url: str | None):
+    cache_key = (
+        repo_full,
+        int(pr_num),
+        str(github_base_url or ""),
+        str(user_auth.get("github_owner", "")),
+    )
+    now = time.time()
+    with _PR_FILES_CACHE_LOCK:
+        entry = _PR_FILES_CACHE.get(cache_key)
+        if entry and (now - entry[0]) < _PR_FILES_CACHE_TTL_S:
+            return entry[1], True
+
+    files_temp = {"repo": repo_full, "pr_number": int(pr_num), "__user_auth": user_auth}
+    if github_base_url:
+        files_temp["__github_base_url"] = github_base_url
+    files_result = TOOL_REGISTRY["get_files_in_pr_tool"](files_temp)
+    file_list = []
+    if isinstance(files_result, dict) and files_result.get("success"):
+        file_list = files_result.get("data", []) or []
+
+    with _PR_FILES_CACHE_LOCK:
+        _PR_FILES_CACHE[cache_key] = (now, file_list)
+    return file_list, False
 
 @app.route("/")
 def index():
@@ -52,26 +146,28 @@ def chat():
     user_msg = data.get("prompt", "").strip()
     history = data.get("history", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
+    review_type = (data.get("review_type") or "").strip()
+    doc_type = (data.get("doc_type") or "").strip()
+    checklist = data.get("checklist", [])
+    outputs = data.get("outputs", [])
+    confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist) or (data.get("confluence_checklist_page_id") or "").strip()
     if not user_msg:
         return jsonify({"error": "Empty prompt"}), 400
-    # Extract detected links from the current prompt first
-    page_ids = _extract_confluence_page_ids_from_text(user_msg)
-    prs = _extract_prs_from_text(user_msg)
-    link_source = "current_message"
-    
+
+    fast_smalltalk = _try_fast_smalltalk_response(user_msg)
+    if fast_smalltalk:
+        return jsonify({"response": fast_smalltalk, "mode": "fast_smalltalk"})
+    link_meta, link_meta_from_cache = _get_cached_chat_link_metadata(user_msg, history)
+    page_ids = link_meta.get("page_ids", [])
+    prs = link_meta.get("prs", [])
+    link_source = link_meta.get("link_source", "current_message")
+
     # Check if credentials are set before attempting to review links
     if page_ids and (not user_auth or not user_auth.get("confluence_email") or not user_auth.get("confluence_api_token")):
         return jsonify({"error": "Confluence credentials not configured. Please set them up in Account Settings."}), 401
     if prs and (not user_auth or not user_auth.get("github_owner") or not user_auth.get("github_token")):
         return jsonify({"error": "GitHub credentials not configured. Please set them up in Account Settings."}), 401
     
-    # If follow-up prompt has no links, reuse the most recent linked user message.
-    if not page_ids and not prs:
-        hist_page_ids, hist_prs = _fallback_links_from_history(history)
-        if hist_page_ids or hist_prs:
-            page_ids = hist_page_ids
-            prs = hist_prs
-            link_source = "history_fallback"
     detected = [f"confluence:{pid}" for pid in page_ids]
     detected += [f"pr:{p['owner']}/{p['repo']}#{p['pr_number']}" for p in prs]
     # Build link context
@@ -93,6 +189,18 @@ def chat():
             owner, repo, pr_num = p["owner"], p["repo"], p["pr_number"]
             link_context += f"  PR: {owner}/{repo}#{pr_num}\n"
         link_context += "\n"
+    if link_meta_from_cache:
+        link_context += "Reused cached link metadata for this chat request.\n\n"
+    if review_type:
+        link_context += f"Review type: {review_type}\n"
+    if doc_type:
+        link_context += f"Document type: {doc_type}\n"
+    if checklist:
+        link_context += "Checklist items: " + ", ".join(str(item) for item in checklist) + "\n"
+    if outputs:
+        link_context += "Expected outputs: " + ", ".join(str(item) for item in outputs) + "\n"
+    if confluence_checklist_page_id:
+        link_context += f"Confluence checklist page: {confluence_checklist_page_id}\n"
     # Try direct fast path for lightweight Confluence spelling tasks.
     set_active_user_auth(user_auth)
     try:
@@ -104,7 +212,21 @@ def chat():
             print(f"[FAST_PATH] Failed and falling back to agent: {e}", flush=True)
         # Run the agent loop
         try:
-            response = run_agent(user_msg, history, link_context)
+            response = run_agent(
+                user_msg,
+                history,
+                link_context,
+                request_meta={
+                    "page_ids": page_ids,
+                    "prs": prs,
+                    "review_type": review_type,
+                    "doc_type": doc_type,
+                    "checklist": checklist,
+                    "outputs": outputs,
+                    "confluence_checklist_page_id": confluence_checklist_page_id,
+                    "link_source": link_source,
+                },
+            )
         except Exception as e:
             print(f"[AGENT] Unhandled error: {e}", flush=True)
             return jsonify({"error": "Something went wrong. Please try again.", "detected": detected}), 500
@@ -140,7 +262,7 @@ def submit_feedback():
 @app.route("/api/pr-checklist", methods=["GET"])
 def get_pr_checklist():
     """GET /api/pr-checklist - returns default PR review checklist."""
-    checklist = _build_universal_pr_review_checklist()
+    checklist = _get_cached_pr_checklist()
     return jsonify({
         "checklist": [
             {"name": item.get("name"), "id": item.get("id")}
@@ -186,7 +308,13 @@ def review_stream():
         import queue
 
         def send_event(event_type, message):
+            
             return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+        
+        # Check credentials upfront
+        if not user_auth or not user_auth.get("github_owner") or not user_auth.get("github_token"):
+            yield send_event("error", "GitHub credentials not configured. Please set them up in Account Settings.")
+            return
 
         yield send_event("progress", "Parsing PR link...")
 
@@ -201,27 +329,26 @@ def review_stream():
 
         yield send_event("progress", f"Detected PR: {repo_full}#{pr_num}")
 
-        # --- Step 1: Fetch changed files (fast, gives us file list for progress) ---
+        # --- Step 1: Fetch changed files (cached to avoid duplicate API calls) ---
         yield send_event("progress", "Fetching changed files...")
         try:
-            files_temp = {"repo": repo_full, "pr_number": pr_num, "__user_auth": user_auth}
-            if github_base_url:
-                files_temp["__github_base_url"] = github_base_url
-            files_result = TOOL_REGISTRY["get_files_in_pr_tool"](files_temp)
-            file_list = []
-            if isinstance(files_result, dict) and files_result.get("success"):
-                file_list = files_result.get("data", [])
-                yield send_event("progress", f"Found {len(file_list)} changed file(s)")
+            file_list, from_cache = _get_cached_pr_files(repo_full, pr_num, user_auth, github_base_url)
+            if isinstance(file_list, list) and file_list:
+                cache_note = " (cached)" if from_cache else ""
+                yield send_event("progress", f"Found {len(file_list)} changed file(s){cache_note}")
                 for f_obj in file_list[:15]:
                     fname = f_obj.get("filename", "") if isinstance(f_obj, dict) else str(f_obj)
                     if fname:
-                        yield send_event("progress", f"  \u2022 {fname}")
+                        add = int(f_obj.get("additions", 0) or 0) if isinstance(f_obj, dict) else 0
+                        delete = int(f_obj.get("deletions", 0) or 0) if isinstance(f_obj, dict) else 0
+                        yield send_event("progress", f"  • {fname} (+{add}/-{delete})")
+                if len(file_list) > 15:
+                    yield send_event("progress", f"  ... and {len(file_list)-15} more file(s)")
             else:
                 yield send_event("progress", "Could not list files, continuing...")
         except Exception as e:
             yield send_event("progress", f"File listing error: {e}")
             file_list = []
-
         # --- Step 2: Run the full review tool in a background thread ---
         yield send_event("progress", "Running checklist analysis (flake8, conventions, consistency)...")
         yield send_event("progress", "This step analyzes all files and posts comments — please wait...")
@@ -232,14 +359,27 @@ def review_stream():
         else:
             checklist = _get_cached_pr_checklist()
 
+        total_changed_lines = sum(
+            int(f.get("additions", 0) or 0) + int(f.get("deletions", 0) or 0)
+            for f in (file_list or [])
+            if isinstance(f, dict)
+        )
+        # High-confidence mode is enforced: never defer checks for speed.
+        large_pr = len(file_list or []) >= 25 or total_changed_lines >= 1800
+        if checklist and large_pr:
+            yield send_event(
+                "progress",
+                "High-confidence mode active: running full checklist on a large PR.",
+            )
+
         # Track how many stderr lines we've already sent so we only send new ones
         _stderr_read_idx = len(mcp_client.stderr_lines)
 
-        # Determine which outputs to skip based on panel selections
-        _want_inline = any("inline" in o.lower() for o in panel_outputs) if panel_outputs else True
-        _want_footer = any("summary" in o.lower() or "general comment" in o.lower() for o in panel_outputs) if panel_outputs else True
-        _skip_inline = not _want_inline
-        _skip_footer = not _want_footer
+        # High-confidence mode is enforced for PR reviews.
+        _skip_inline = False
+        _skip_footer = False
+        _max_inline_comments = _STRICT_INLINE_COMMENT_LIMIT
+        _group_similar_inline = True
 
         def _run_review():
             try:
@@ -249,12 +389,33 @@ def review_stream():
                     "checklist": checklist,
                     "skip_inline": _skip_inline,
                     "skip_footer": _skip_footer,
+                    "max_inline_comments": _max_inline_comments,
+                    "group_similar_inline": _group_similar_inline,
                     "__user_auth": user_auth,
                 }
                 if github_base_url:
                     review_args["__github_base_url"] = github_base_url
-                result = TOOL_REGISTRY["review_pull_request_tool"](review_args)
-                result_queue.put(("ok", result))
+
+                review_key = _make_review_coalesce_key(
+                    repo_full,
+                    int(pr_num),
+                    checklist=checklist,
+                    skip_inline=_skip_inline,
+                    skip_footer=_skip_footer,
+                    max_inline_comments=_max_inline_comments,
+                    group_similar_inline=_group_similar_inline,
+                    github_base_url=github_base_url,
+                )
+
+                def _invoke_review():
+                    return TOOL_REGISTRY["review_pull_request_tool"](review_args)
+
+                result, reused_inflight, waited_s = _run_review_with_coalescing(review_key, _invoke_review)
+                result_queue.put(("ok", {
+                    "result": result,
+                    "reused_inflight": reused_inflight,
+                    "waited_s": waited_s,
+                }))
             except Exception as e:
                 result_queue.put(("error", str(e)))
 
@@ -311,7 +472,17 @@ def review_stream():
             yield send_event("error", f"Review tool crashed: {payload}")
             return
 
+        reused_inflight = False
+        waited_s = 0.0
         result = payload
+        if isinstance(payload, dict) and "result" in payload:
+            result = payload.get("result")
+            reused_inflight = bool(payload.get("reused_inflight", False))
+            try:
+                waited_s = float(payload.get("waited_s", 0.0) or 0.0)
+            except Exception:
+                waited_s = 0.0
+
         if isinstance(result, dict) and result.get("success"):
             data_r = result.get("data", {})
             summary = data_r.get("summary", "") if isinstance(data_r, dict) else str(data_r)
@@ -320,8 +491,12 @@ def review_stream():
             conv_v = data_r.get("convention_issues", 0) if isinstance(data_r, dict) else 0
             consist_v = data_r.get("consistency_issues", 0) if isinstance(data_r, dict) else 0
             inline_posted = data_r.get("inline_comments_posted", 0) if isinstance(data_r, dict) else 0
+            inline_total = data_r.get("inline_candidates_total", 0) if isinstance(data_r, dict) else 0
+            inline_selected = data_r.get("inline_candidates_selected", 0) if isinstance(data_r, dict) else 0
 
             yield send_event("progress", f"\u2705 Review complete in {elapsed_s:.1f}s")
+            if reused_inflight:
+                yield send_event("progress", f"  Reused in-flight result for duplicate request (waited {waited_s:.1f}s)")
             if flake8_v > 0:
                 yield send_event("progress", f"  Flake8 violations: {flake8_v}")
             if conv_v > 0:
@@ -330,6 +505,8 @@ def review_stream():
                 yield send_event("progress", f"  Consistency issues: {consist_v}")
             if inline_posted > 0:
                 yield send_event("progress", f"  Inline comments posted: {inline_posted}")
+            if inline_total > inline_selected:
+                yield send_event("progress", f"  Inline candidates reduced: {inline_total} -> {inline_selected} (grouped/capped)")
 
             lines = [f"Completed PR review for {repo_full}#{pr_num} in {elapsed_s:.1f}s."]
             if reviewed:
@@ -363,6 +540,7 @@ def confluence_review_stream():
     checklist = data.get("checklist", [])
     outputs = data.get("outputs", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
+    confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist)
     confluence_base_url = data.get("confluence_base_url")  # Extracted from the link by frontend
 
     if not page_id and not page_input:
@@ -373,6 +551,11 @@ def confluence_review_stream():
 
         def send_event(event_type, message):
             return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+                # Check credentials upfront
+        
+        if not user_auth or not user_auth.get("confluence_email") or not user_auth.get("confluence_api_token"):
+            yield send_event("error", "Confluence credentials not configured. Please set them up in Account Settings.")
+            return
 
         yield send_event("progress", "Parsing Confluence page input...")
 
@@ -415,7 +598,7 @@ def confluence_review_stream():
             yield send_event("progress", f"Checklist items: {len(checklist)} selected")
 
         # --- Step 2: Run the review in a background thread ---
-        yield send_event("progress", "Starting page review (spelling, grammar, readability, structure)...")
+        yield send_event("progress", "Starting page review with the selected checklist...")
         yield send_event("progress", "This may take a moment — please wait...")
 
         result_queue = _q.Queue()
@@ -423,15 +606,13 @@ def confluence_review_stream():
         # Track stderr position for reading [REVIEW] messages from MCP server
         _stderr_read_idx = len(mcp_client.stderr_lines)
 
-        # Determine which output types to skip based on user's selections
-        want_inline = any("inline" in o.lower() for o in outputs)
-        want_footer = any("footer" in o.lower() or "summary" in o.lower() for o in outputs)
-        _skip_inline = not want_inline
-        _skip_footer = not want_footer
+        # High-confidence mode is enforced for Confluence reviews.
+        _skip_inline = False
+        _skip_footer = False
 
         def _run_confluence_review():
             try:
-                review_args = {"page_input": resolved_id, "skip_inline": _skip_inline, "skip_footer": _skip_footer, "__user_auth": user_auth}
+                review_args = {"page_input": resolved_id, "checklist_page_id": confluence_checklist_page_id, "skip_inline": _skip_inline, "skip_footer": _skip_footer, "__user_auth": user_auth}
                 if confluence_base_url:
                     review_args["__confluence_base_url"] = confluence_base_url
                 result = TOOL_REGISTRY["review_confluence_page_content"](review_args)
@@ -494,33 +675,73 @@ def confluence_review_stream():
             yield send_event("error", f"Review failed: {payload}")
             return
 
+        reused_inflight = False
+        waited_s = 0.0
         result = payload
+        if isinstance(payload, dict) and "result" in payload:
+            result = payload.get("result")
+            reused_inflight = bool(payload.get("reused_inflight", False))
+            try:
+                waited_s = float(payload.get("waited_s", 0.0) or 0.0)
+            except Exception:
+                waited_s = 0.0
+
         if isinstance(result, dict) and result.get("success"):
             data_r = result.get("data", {})
             if isinstance(data_r, dict):
                 summary = data_r.get("summary", "")
-                total_issues = data_r.get("total_issues", 0)
-                inline_posted = data_r.get("inline_comments_posted", 0)
-                footer_posted = data_r.get("footer_comment_posted", False)
+                total_issues = int(data_r.get("issues_found", data_r.get("total_issues", 0)) or 0)
+                inline_posted = int(data_r.get("comments_posted", data_r.get("inline_comments_posted", 0)) or 0)
+                inline_failed = int(data_r.get("inline_failures_count", 0) or 0)
+                footer_posted = bool(data_r.get("footer_posted", data_r.get("footer_comment_posted", False)))
+                executed_checks = list(data_r.get("executed_checks", []) or [])
+                skipped_checks = list(data_r.get("skipped_checks", []) or [])
             else:
                 summary = str(data_r)
                 total_issues = 0
                 inline_posted = 0
+                inline_failed = 0
                 footer_posted = False
+                executed_checks = []
+                skipped_checks = []
 
             yield send_event("progress", f"\u2705 Review complete in {elapsed_s:.1f}s")
+            if reused_inflight:
+                yield send_event("progress", f"  Reused in-flight result for duplicate request (waited {waited_s:.1f}s)")
             if total_issues > 0:
                 yield send_event("progress", f"  Issues found: {total_issues}")
-            if inline_posted > 0:
-                yield send_event("progress", f"  Inline comments posted: {inline_posted}")
+            else:
+                yield send_event("progress", "  No issues were found for the selected checklist")
+            yield send_event("progress", f"  Inline comments posted: {inline_posted}")
+            if inline_failed > 0:
+                yield send_event("progress", f"  Inline comments failed: {inline_failed}")
+            elif total_issues == 0:
+                yield send_event("progress", "  No inline comments were posted because no findings required them")
             if footer_posted:
                 yield send_event("progress", "  Footer summary posted to page")
+            else:
+                yield send_event("progress", "  Footer summary was not posted")
+            if executed_checks:
+                yield send_event("progress", "  Executed checks: " + ", ".join(str(item) for item in executed_checks))
+            if skipped_checks:
+                skipped_text = ", ".join(f"{item.get('id', 'unknown')} ({item.get('reason', 'skipped')})" for item in skipped_checks[:5])
+                yield send_event("progress", "  Skipped checks: " + skipped_text)
 
             lines = [f"Completed Confluence page review for page {resolved_id} in {elapsed_s:.1f}s."]
+            lines.append(f"Issues found: {total_issues}.")
+            lines.append(f"Inline comments posted: {inline_posted}.")
+            if inline_failed > 0:
+                lines.append(f"Inline comments failed: {inline_failed}.")
+            elif total_issues == 0:
+                lines.append("No inline comments were needed because the selected checks found no issues.")
+            lines.append("Footer summary posted to the page." if footer_posted else "Footer summary could not be posted to the page.")
+            if executed_checks:
+                lines.append("Executed checks: " + ", ".join(str(item) for item in executed_checks) + ".")
+            if skipped_checks:
+                skipped_text = ", ".join(f"{item.get('id', 'unknown')} ({item.get('reason', 'skipped')})" for item in skipped_checks[:5])
+                lines.append("Skipped checks: " + skipped_text + ".")
             if summary:
                 lines.append(summary)
-            else:
-                lines.append("Review comments have been posted to the Confluence page.")
             yield send_event("done", "\n".join(lines))
         else:
             error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
