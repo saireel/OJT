@@ -20,7 +20,36 @@
         "command": "copilotBridge.stop",
         "title": "Copilot Bridge: Stop Server"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Copilot Bridge",
+      "properties": {
+        "copilotBridge.fastModelHints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude",
+            "haiku",
+            "sonnet"
+          ],
+          "description": "Model name/family hints used for fast tasks. The extension picks the first available model matching these hints."
+        },
+        "copilotBridge.defaultModelHints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude",
+            "sonnet",
+            "opus"
+          ],
+          "description": "Model name/family hints used for non-fast tasks. The extension picks the first available model matching these hints."
+        }
+      }
+    }
   },
   "extensionDependencies": [
     "github.copilot-chat"

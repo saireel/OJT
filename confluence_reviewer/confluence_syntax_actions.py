@@ -199,7 +199,7 @@ class SyntaxActions:
         self,
         page_id: str,
         chunk_size: int = 2500,
-        max_sections: int = 5
+        max_sections: int = 50
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Retrieve a page and split its plain text into review-friendly sections.
         Boundaries prefer sentence endings so chunks do not cut words or sentences abruptly."""

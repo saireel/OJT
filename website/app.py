@@ -1,425 +1,868 @@
-import sys
-import os
-import re
-import json
-import subprocess
-import threading
+# app.py
+# Thin Flask entrypoint: routes only. Core logic lives in app_logic.py.
 import atexit
+import queue
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 
-from flask import Flask, render_template, request, jsonify
-import requests
+try:
+    from . import app_logic as _logic
+except ImportError:
+    import app_logic as _logic
 
-MCP_SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-MCP_SERVER_SCRIPT = os.path.join(MCP_SERVER_DIR, "mcp_tools.py")
+_extract_prs_from_text = _logic._extract_prs_from_text
+_try_fast_confluence_spelling_review = _logic._try_fast_confluence_spelling_review
+run_agent = _logic.run_agent
+normalize_user_auth = _logic.normalize_user_auth
+
+
+_CONFLUENCE_PANEL_CHECK_MAP = {
+    "spelling & grammar": "grammar",
+    "repeated words": "repeated_word",
+    "long sentences (readability)": "long_sentence",
+    "long paragraphs": "long_paragraph",
+    "page structure & headings": "structure",
+    "table of contents present": "structure",
+    "broken / missing links": "citation",
+    "outdated information": "statistics_validation",
+    "consistent terminology": "consistency_checks",
+    "consistent formatting": "table_validation",
+    "proper use of code blocks": "structure",
+    "missing sections / incomplete content": "structure",
+}
+
+
+def _resolve_confluence_checklist_page_id(checklist):
+    selected_ids = []
+    seen = set()
+    for raw in (checklist or []):
+        label = str(raw).strip().lower()
+        if not label:
+            continue
+        check_id = _CONFLUENCE_PANEL_CHECK_MAP.get(label)
+        if not check_id or check_id in seen:
+            continue
+        selected_ids.append(check_id)
+        seen.add(check_id)
+
+    if not selected_ids:
+        return ""
+
+    if selected_ids == ["grammar"]:
+        return "__GRAMMAR_ONLY__"
+
+    return "__CUSTOM_CHECKS__:" + ",".join(selected_ids)
+
+
+set_active_user_auth = _logic.set_active_user_auth
+clear_active_user_auth = _logic.clear_active_user_auth
+FEEDBACK_FILE = _logic.FEEDBACK_FILE
+_build_checklist_from_panel = _logic._build_checklist_from_panel
+_get_cached_pr_checklist = _logic._get_cached_pr_checklist
+_get_cached_chat_link_metadata = _logic._get_cached_chat_link_metadata
+_make_review_coalesce_key = _logic._make_review_coalesce_key
+_run_review_with_coalescing = _logic._run_review_with_coalescing
+_clean_review_line = _logic._clean_review_line
+TOOL_REGISTRY = _logic.TOOL_REGISTRY
+mcp_client = _logic.mcp_client
+json = _logic.json
+re = _logic.re
+threading = _logic.threading
+time = _logic.time
 
 app = Flask(__name__)
 
-COPILOT_BRIDGE_URL = "http://127.0.0.1:5100/api/prompt"
 
+def _try_fast_smalltalk_response(user_msg: str) -> str | None:
+    """Return an immediate local response for simple greetings to avoid LLM latency."""
+    if not user_msg:
+        return None
+    normalized = re.sub(r"[^a-z0-9\s?!.,]", "", user_msg.lower()).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized_no_punct = re.sub(r"[?!.,]+", "", normalized).strip()
 
-# -- MCP Client (stdio JSON-RPC) ----------------------------------------
+    quick_greetings = {
+        "hi", "hello", "hey", "yo", "hii", "hey there", "hello there", "hi there"
+    }
+    greeting_words = {"hi", "hello", "hey", "yo", "hii"}
+    greeting_targets = {"there", "munnai", "assistant", "ai"}
 
-class MCPClient:
-    """Communicates with the FastMCP server over stdio using JSON-RPC."""
+    parts = normalized_no_punct.split()
+    if normalized_no_punct in quick_greetings:
+        return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed."
+    if parts and parts[0] in greeting_words and len(parts) <= 3:
+        if len(parts) == 1 or parts[1] in greeting_targets:
+            return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed."
 
-    def __init__(self):
-        self.process: subprocess.Popen[bytes] | None = None
-        self.lock = threading.Lock()
-        self._request_id = 0
-        self._initialized = False
-
-    def _ensure_started(self):
-        if self.process is None or self.process.poll() is not None:
-            env = {
-                **os.environ,
-                "ENABLE_READABILITY_CHECK": "true",
-                "READABILITY_SENTENCE_WORD_LIMIT": "40",
-                "READABILITY_PARAGRAPH_WORD_LIMIT": "250",
-            }
-            self.process = subprocess.Popen(
-                [sys.executable, MCP_SERVER_SCRIPT],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=MCP_SERVER_DIR,
-                env=env,
-            )
-            assert self.process.stdin is not None
-            assert self.process.stdout is not None
-            self._initialized = False
-
-        if not self._initialized:
-            self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "flask-bridge", "version": "1.0.0"},
-            })
-            self._send_notification("notifications/initialized", {})
-            self._initialized = True
-
-    def _next_id(self):
-        self._request_id += 1
-        return self._request_id
-
-    def _send_request(self, method, params, timeout=None):
-        msg = {"jsonrpc": "2.0", "id": self._next_id(), "method": method, "params": params}
-        if timeout is None:
-            return self._send_and_receive(msg)
-        return self._send_and_receive(msg, timeout=timeout)
-
-    def _send_notification(self, method, params):
-        msg = {"jsonrpc": "2.0", "method": method, "params": params}
-        raw = json.dumps(msg) + "\n"
-        proc = self.process
-        if proc is None or proc.stdin is None:
-            raise RuntimeError("MCP server not started")
-        proc.stdin.write(raw.encode("utf-8"))
-        proc.stdin.flush()
-
-    def _send_and_receive(self, msg, timeout=120):
-        proc = self.process
-        if proc is None or proc.stdin is None or proc.stdout is None:
-            raise RuntimeError("MCP server not started")
-        raw = json.dumps(msg) + "\n"
-        proc.stdin.write(raw.encode("utf-8"))
-        proc.stdin.flush()
-
-        msg_id = msg.get("id")
-        print(f"[MCP] Sent: {msg.get('method', '?')} (id={msg_id})", flush=True)
-
-        import time
-        from queue import Queue, Empty
-
-        result_queue: Queue = Queue()
-
-        def _reader():
-            try:
-                stdout = proc.stdout
-                if stdout is None:
-                    result_queue.put(RuntimeError("MCP server stdout is None"))
-                    return
-                while True:
-                    line = stdout.readline()
-                    if not line:
-                        result_queue.put(ConnectionError("MCP server closed unexpectedly"))
-                        return
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        parsed = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    # Skip notifications (no "id" field) — we only want our response
-                    if "id" not in parsed:
-                        print(f"[MCP] notification: {parsed.get('method', '?')}", flush=True)
-                        continue
-                    result_queue.put(parsed)
-                    return
-            except Exception as e:
-                result_queue.put(e)
-
-        reader_thread = threading.Thread(target=_reader, daemon=True)
-        reader_thread.start()
-
-        start = time.time()
-        try:
-            result = result_queue.get(timeout=timeout)
-        except Empty:
-            stderr_output = ""
-            if proc.stderr:
-                try:
-                    import selectors
-                    sel = selectors.DefaultSelector()
-                    sel.register(proc.stderr, selectors.EVENT_READ)
-                    if sel.select(timeout=0):
-                        stderr_output = proc.stderr.read(4096).decode("utf-8", errors="replace")
-                    sel.close()
-                except Exception:
-                    pass
-            raise TimeoutError(
-                f"MCP server did not respond within {timeout}s. stderr: {stderr_output or '(empty)'}"
-            )
-
-        if isinstance(result, Exception):
-            raise result
-
-        elapsed = time.time() - start
-        print(f"[MCP] Response received in {elapsed:.1f}s", flush=True)
-        return result
-
-    def call_tool(self, tool_name, arguments):
-        with self.lock:
-            try:
-                print(f"[MCP] call_tool: {tool_name}", flush=True)
-                self._ensure_started()
-                result = self._send_request("tools/call", {"name": tool_name, "arguments": arguments}, timeout=300)
-                print(f"[MCP] call_tool result keys: {list(result.keys()) if isinstance(result, dict) else type(result)}", flush=True)
-                if "error" in result:
-                    return {"success": False, "error": result["error"].get("message", str(result["error"]))}
-                tool_content = result.get("result", {}).get("content", [])
-                if tool_content:
-                    text = tool_content[0].get("text", "")
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        return {"success": True, "data": text}
-                return {"success": True, "data": result.get("result")}
-            except Exception as e:
-                print(f"[MCP] call_tool error: {e}", flush=True)
-                return {"success": False, "error": str(e)}
-
-    def list_tools(self):
-        with self.lock:
-            self._ensure_started()
-            result = self._send_request("tools/list", {})
-            return result.get("result", {}).get("tools", [])
-
-    def shutdown(self):
-        proc = self.process
-        if proc is not None and proc.poll() is None:
-            try:
-                if proc.stdin is not None:
-                    proc.stdin.close()
-                proc.wait(timeout=5)
-            except Exception:
-                proc.kill()
-
-
-mcp_client = MCPClient()
-
-
-# -- Copilot Bridge ------------------------------------------------------
-
-def send_to_copilot(prompt: str) -> tuple[str, str | None]:
-    try:
-        resp = requests.post(COPILOT_BRIDGE_URL, json={"prompt": prompt}, timeout=180)
-        data = resp.json()
-        if "error" in data:
-            return "", f"Bridge error: {data['error']}"
-        return data.get("response", ""), None
-    except requests.ConnectionError:
-        return "", "Cannot reach Copilot Bridge. Make sure VS Code is running with the bridge extension active."
-    except requests.Timeout:
-        return "", "Request timed out."
-    except Exception as e:
-        return "", str(e)
-
-
-# -- Helpers -------------------------------------------------------------
-
-def extract_confluence_page_id(url: str) -> str | None:
-    m = re.search(r"/pages/(\d+)", url)
-    return m.group(1) if m else None
-
-
-def extract_pr_info(url: str) -> dict | None:
-    m = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
-    if m:
-        return {"owner": m.group(1), "repo": m.group(2), "pr_number": int(m.group(3))}
+    if normalized_no_punct in {"thanks", "thank you", "ty", "tnx"}:
+        return "You are welcome. I can help with PR reviews, Confluence checks, and account setup too."
+    if normalized_no_punct in {"ok", "okay", "k", "cool", "nice"}:
+        return "Great. Send the next task when you are ready."
     return None
 
 
-def format_result(data) -> str:
-    if isinstance(data, str):
-        return data
-    return json.dumps(data, indent=2, default=str)
+_PR_FILES_CACHE_TTL_S = 45
+_PR_FILES_CACHE: dict[tuple, tuple[float, list]] = {}
+_PR_FILES_CACHE_LOCK = threading.Lock()
+_STRICT_INLINE_COMMENT_LIMIT = 12
 
 
-# -- Routes --------------------------------------------------------------
+def _get_cached_pr_files(repo_full: str, pr_num: int, user_auth: dict, github_base_url: str | None):
+    cache_key = (
+        repo_full,
+        int(pr_num),
+        str(github_base_url or ""),
+        str(user_auth.get("github_owner", "")),
+    )
+    now = time.time()
+    with _PR_FILES_CACHE_LOCK:
+        entry = _PR_FILES_CACHE.get(cache_key)
+        if entry and (now - entry[0]) < _PR_FILES_CACHE_TTL_S:
+            return entry[1], True
+
+    files_temp = {"repo": repo_full, "pr_number": int(pr_num), "__user_auth": user_auth}
+    if github_base_url:
+        files_temp["__github_base_url"] = github_base_url
+    files_result = TOOL_REGISTRY["get_files_in_pr_tool"](files_temp)
+    file_list = []
+    if isinstance(files_result, dict) and files_result.get("success"):
+        file_list = files_result.get("data", []) or []
+
+    with _PR_FILES_CACHE_LOCK:
+        _PR_FILES_CACHE[cache_key] = (now, file_list)
+    return file_list, False
 
 @app.route("/")
 def index():
+    # Renders the main web page (index.html)
+    """Renders and returns the main index.html page."""
     return render_template("index.html")
+
+
+@app.route("/quick-user-guide")
+def quick_user_guide():
+    """Renders the quick user guide page."""
+    return render_template("quick_user_guide.html")
 
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
+    """POST /api/chat - extracts links from the user prompt, runs the agent loop, and returns the response."""
     data = request.get_json(silent=True) or {}
     user_msg = data.get("prompt", "").strip()
+    history = data.get("history", [])
+    user_auth = normalize_user_auth(data.get("user_auth", {}))
+    review_type = (data.get("review_type") or "").strip()
+    doc_type = (data.get("doc_type") or "").strip()
+    checklist = data.get("checklist", [])
+    outputs = data.get("outputs", [])
+    confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist) or (data.get("confluence_checklist_page_id") or "").strip()
     if not user_msg:
         return jsonify({"error": "Empty prompt"}), 400
 
-    # Detect Confluence page links
-    conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
-    page_ids: list[str] = []
-    for url in conf_urls:
-        pid = extract_confluence_page_id(url)
-        if pid and pid not in page_ids:
-            page_ids.append(pid)
+    fast_smalltalk = _try_fast_smalltalk_response(user_msg)
+    if fast_smalltalk:
+        return jsonify({"response": fast_smalltalk, "mode": "fast_smalltalk"})
+    link_meta, link_meta_from_cache = _get_cached_chat_link_metadata(user_msg, history)
+    page_ids = link_meta.get("page_ids", [])
+    prs = link_meta.get("prs", [])
+    link_source = link_meta.get("link_source", "current_message")
 
-    # Detect GitHub PR links
-    pr_urls = re.findall(r"https?://github\.com/[^\s]+/pull/\d+", user_msg)
-    prs: list[dict] = []
-    seen_prs: set[tuple[str, str, int]] = set()
-    for url in pr_urls:
-        info = extract_pr_info(url)
-        if info:
-            key = (info["owner"], info["repo"], info["pr_number"])
-            if key not in seen_prs:
-                seen_prs.add(key)
-                prs.append(info)
-
-    # No links -- plain Copilot chat
-    if not page_ids and not prs:
-        response, err = send_to_copilot(user_msg)
-        if err:
-            return jsonify({"error": err}), 502
-        return jsonify({"response": response})
-
-    # Confluence pages detected
-    if page_ids:
-        return handle_confluence(user_msg, page_ids)
-
-    # GitHub PRs detected
-    if prs:
-        return handle_pr(user_msg, prs)
-
-    return jsonify({"error": "Could not process request"}), 400
-
-
-# -- Confluence Handler --------------------------------------------------
-
-def _is_review_request(user_msg: str) -> bool:
-    """Check if the user is asking to apply instructions/review one page using another."""
-    review_keywords = [
-        r"apply.*(?:instructions|checklist|rules|guidelines)",
-        r"review.*page",
-        r"use.*instructions.*(?:on|to|for)",
-        r"follow.*instructions.*(?:on|to|for)",
-        r"check.*page.*(?:using|with|from)",
-    ]
-    msg_lower = user_msg.lower()
-    return any(re.search(p, msg_lower) for p in review_keywords)
-
-
-def _identify_roles(user_msg: str, conf_urls: list[str], page_ids: list[str]) -> tuple[str | None, str | None]:
-    """Identify which page is the checklist and which is the target based on surrounding text.
-    Returns (checklist_id, target_id). Either may be None if not identified."""
-    msg_lower = user_msg.lower()
-
-    checklist_patterns = [
-        r"(?:use|follow|from|using)\s+(?:the\s+)?(?:instructions|checklist|rules|guidelines)\s+(?:from|on|in)\s+",
-        r"(?:instructions|checklist|rules|guidelines)\s+(?:from|on|in)\s+",
-    ]
-    target_patterns = [
-        r"(?:apply|review|check|use)\s+(?:it\s+)?(?:on|to|for)\s+(?:this\s+)?(?:page)?\s*",
-        r"(?:on|to|for)\s+(?:this\s+)?page\s*",
-    ]
-
-    checklist_id = None
-    target_id = None
-
-    # For each URL, check if its surrounding text matches checklist or target patterns
-    for i, url in enumerate(conf_urls):
-        url_pos = msg_lower.find(url.lower())
-        if url_pos < 0:
-            continue
-        # Get text before this URL (up to 100 chars)
-        before_text = msg_lower[max(0, url_pos - 100):url_pos]
-
-        for pattern in checklist_patterns:
-            if re.search(pattern, before_text):
-                checklist_id = page_ids[i]
-                break
-        for pattern in target_patterns:
-            if re.search(pattern, before_text):
-                target_id = page_ids[i]
-                break
-
-    # If we identified one but not the other, assign the remaining page
-    if len(page_ids) == 2:
-        if checklist_id and not target_id:
-            target_id = [pid for pid in page_ids if pid != checklist_id][0]
-        elif target_id and not checklist_id:
-            checklist_id = [pid for pid in page_ids if pid != target_id][0]
-
-    return checklist_id, target_id
-
-
-def handle_confluence(user_msg: str, page_ids: list[str]):
+    # Check if credentials are set before attempting to review links
+    if page_ids and (not user_auth or not user_auth.get("confluence_email") or not user_auth.get("confluence_api_token")):
+        return jsonify({"error": "Confluence credentials not configured. Please set them up in Account Settings."}), 401
+    if prs and (not user_auth or not user_auth.get("github_owner") or not user_auth.get("github_token")):
+        return jsonify({"error": "GitHub credentials not configured. Please set them up in Account Settings."}), 401
+    
     detected = [f"confluence:{pid}" for pid in page_ids]
+    detected += [f"pr:{p['owner']}/{p['repo']}#{p['pr_number']}" for p in prs]
+    # Build link context
+    link_context = ""
+    if page_ids:
+        if link_source == "history_fallback":
+            link_context += "Detected Confluence page IDs from recent conversation history (follow-up context):\n"
+        else:
+            link_context += "Detected Confluence page IDs from the user's message:\n"
+        for i, pid in enumerate(page_ids):
+            link_context += f"  Link {i+1}: page_id = \"{pid}\"\n"
+        link_context += "\n"
+    if prs:
+        if link_source == "history_fallback":
+            link_context += "Detected GitHub PRs from recent conversation history (follow-up context):\n"
+        else:
+            link_context += "Detected GitHub PRs from the user's message:\n"
+        for p in prs:
+            owner, repo, pr_num = p["owner"], p["repo"], p["pr_number"]
+            link_context += f"  PR: {owner}/{repo}#{pr_num}\n"
+        link_context += "\n"
+    if link_meta_from_cache:
+        link_context += "Reused cached link metadata for this chat request.\n\n"
+    if review_type:
+        link_context += f"Review type: {review_type}\n"
+    if doc_type:
+        link_context += f"Document type: {doc_type}\n"
+    if checklist:
+        link_context += "Checklist items: " + ", ".join(str(item) for item in checklist) + "\n"
+    if outputs:
+        link_context += "Expected outputs: " + ", ".join(str(item) for item in outputs) + "\n"
+    if confluence_checklist_page_id:
+        link_context += f"Confluence checklist page: {confluence_checklist_page_id}\n"
+    # Try direct fast path for lightweight Confluence spelling tasks.
+    set_active_user_auth(user_auth)
+    try:
+        try:
+            fast_response = _try_fast_confluence_spelling_review(user_msg, history, page_ids)
+            if fast_response:
+                return jsonify({"response": fast_response, "detected": detected if detected else None, "mode": "fast_path"})
+        except Exception as e:
+            print(f"[FAST_PATH] Failed and falling back to agent: {e}", flush=True)
+        # Run the agent loop
+        try:
+            response = run_agent(
+                user_msg,
+                history,
+                link_context,
+                request_meta={
+                    "page_ids": page_ids,
+                    "prs": prs,
+                    "review_type": review_type,
+                    "doc_type": doc_type,
+                    "checklist": checklist,
+                    "outputs": outputs,
+                    "confluence_checklist_page_id": confluence_checklist_page_id,
+                    "link_source": link_source,
+                },
+            )
+        except Exception as e:
+            print(f"[AGENT] Unhandled error: {e}", flush=True)
+            return jsonify({"error": "Something went wrong. Please try again.", "detected": detected}), 500
+        return jsonify({"response": response, "detected": detected if detected else None})
+    finally:
+        clear_active_user_auth()
 
-    # Re-extract URLs in order to match them to page_ids positionally
-    conf_urls = re.findall(r"https?://[^\s]*atlassian\.net/wiki[^\s]*", user_msg)
+@app.route("/api/chat-stream", methods=["POST"])
+def chat_stream():
+    """POST /api/chat-stream - streams agent progress as SSE, then delivers the final answer instantly."""
+    data = request.get_json(silent=True) or {}
+    user_msg = data.get("prompt", "").strip()
+    history = data.get("history", [])
+    user_auth = normalize_user_auth(data.get("user_auth", {}))
+    review_type = (data.get("review_type") or "").strip()
+    doc_type = (data.get("doc_type") or "").strip()
+    checklist = data.get("checklist", [])
+    outputs = data.get("outputs", [])
+    confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist) or (data.get("confluence_checklist_page_id") or "").strip()
 
-    # If multiple pages and user wants to apply instructions/review,
-    # use MCP review tool to post comments directly on the Confluence page
-    if len(page_ids) >= 2 and _is_review_request(user_msg):
-        checklist_id, target_id = _identify_roles(user_msg, conf_urls, page_ids)
+    if not user_msg:
+        def _err_gen():
+            yield 'data: {"type":"error","message":"Empty prompt"}\n\n'
+        return Response(stream_with_context(_err_gen()), mimetype="text/event-stream")
 
-        if checklist_id and target_id:
-            print(f"[DEBUG] Confluence review: checklist={checklist_id}, target={target_id}", flush=True)
-            result = mcp_client.call_tool("review_confluence_page_content", {
-                "page_id": target_id,
-                "checklist_page_id": checklist_id,
-            })
-            print(f"[DEBUG] Confluence review result: {str(result)[:300]}", flush=True)
+    def generate():
+        q = queue.Queue()
+        SENTINEL = object()
 
-            if not result.get("success"):
-                return jsonify({"error": result.get("error", "Confluence review failed"), "detected": detected}), 502
+        def _fmt(event_type, message):
+            return "data: " + json.dumps({"type": event_type, "message": message}) + "\n\n"
 
-            review_data = result.get("data", {})
-            summary = f"Review completed and comments posted to Confluence page {target_id}.\n\n{format_result(review_data)}"
-            return jsonify({"response": summary, "detected": detected})
+        def _run():
+            try:
+                from . import app_logic as _al
+            except ImportError:
+                import app_logic as _al
+            _al.set_active_user_auth(user_auth)
+            try:
+                link_meta, link_meta_from_cache = _get_cached_chat_link_metadata(user_msg, history)
+                page_ids = link_meta.get("page_ids", [])
+                prs = link_meta.get("prs", [])
+                link_source = link_meta.get("link_source", "current_message")
+                link_context = ""
+                if page_ids:
+                    hdr = "Detected Confluence page IDs from recent conversation history (follow-up context):\n" if link_source == "history_fallback" else "Detected Confluence page IDs from the user's message:\n"
+                    link_context += hdr
+                    for idx, pid in enumerate(page_ids):
+                        link_context += "  Link {}: page_id = \"{}\"\n".format(idx + 1, pid)
+                    link_context += "\n"
+                if prs:
+                    hdr = "Detected GitHub PRs from recent conversation history (follow-up context):\n" if link_source == "history_fallback" else "Detected GitHub PRs from the user's message:\n"
+                    link_context += hdr
+                    for pr in prs:
+                        link_context += "  PR: {}/{}#{}\n".format(pr["owner"], pr["repo"], pr["pr_number"])
+                    link_context += "\n"
+                if link_meta_from_cache:
+                    link_context += "Reused cached link metadata for this chat request.\n\n"
+                if review_type:
+                    link_context += "Review type: {}\n".format(review_type)
+                if doc_type:
+                    link_context += "Document type: {}\n".format(doc_type)
+                if checklist:
+                    link_context += "Checklist items: " + ", ".join(str(item) for item in checklist) + "\n"
+                if outputs:
+                    link_context += "Expected outputs: " + ", ".join(str(item) for item in outputs) + "\n"
+                if confluence_checklist_page_id:
+                    link_context += "Confluence checklist page: {}\n".format(confluence_checklist_page_id)
+                detected = ["confluence:{}".format(pid) for pid in page_ids]
+                detected += ["pr:{}/{}#{}".format(pr["owner"], pr["repo"], pr["pr_number"]) for pr in prs]
 
-    # Otherwise, fetch content and send to Copilot for a general response
-    target_id = page_ids[-1]
+                def _progress(msg):
+                    q.put(("progress", msg))
 
-    page_result = mcp_client.call_tool("get_page_content_by_sections_tool", {"page_id": target_id})
-    if not page_result.get("success"):
-        return jsonify({"error": page_result.get("error", "Failed to fetch page content"), "detected": detected}), 502
+                response = _al.run_agent(
+                    user_msg, history, link_context,
+                    request_meta={
+                        "page_ids": page_ids,
+                        "prs": prs,
+                        "review_type": review_type,
+                        "doc_type": doc_type,
+                        "checklist": checklist,
+                        "outputs": outputs,
+                        "confluence_checklist_page_id": confluence_checklist_page_id,
+                        "link_source": link_source,
+                    },
+                    progress_callback=_progress,
+                )
+                q.put(("done", json.dumps({"response": response, "detected": detected or None})))
+            except Exception as exc:
+                q.put(("error", str(exc)))
+            finally:
+                _al.clear_active_user_auth()
+                q.put(SENTINEL)
 
-    page_content = page_result.get("data", "")
+        threading.Thread(target=_run, daemon=True).start()
 
-    # If multiple pages, fetch their content as well
-    reference_content = ""
-    if len(page_ids) > 1:
-        for pid in page_ids[:-1]:
-            ref_result = mcp_client.call_tool("get_page_content_by_sections_tool", {"page_id": pid})
-            if ref_result.get("success"):
-                reference_content += f"\n--- Reference Page {pid} ---\n{format_result(ref_result.get('data', ''))}\n--- End ---\n"
+        while True:
+            try:
+                item = q.get(timeout=30)
+            except queue.Empty:
+                yield _fmt("heartbeat", "")
+                continue
+            if item is SENTINEL:
+                break
+            event_type, payload = item
+            yield _fmt(event_type, payload)
 
-    # Compose prompt for Copilot
-    prompt = (
-        f"USER PROMPT: {user_msg}\n\n"
-        f"{reference_content}"
-        f"--- Target Confluence Page Content ({target_id}) ---\n{format_result(page_content)}\n--- End ---\n\n"
-        "Respond to the user prompt using the page content above."
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
 
-    response, err = send_to_copilot(prompt)
-    if err:
-        return jsonify({"error": err, "detected": detected}), 502
+# --- Feedback API Endpoint ---
+# Lets users report false positives (e.g. a term wrongly flagged as context noise).
+# The feedback is stored in a JSON file and loaded into the AI's context on future requests.
+@app.route("/api/feedback", methods=["POST"])
+def submit_feedback():
+    """POST /api/feedback - records user feedback about a flagged term to the feedback log file."""
+    data = request.get_json(silent=True) or {}
+    term = data.get("term", "").strip()
+    sentence = data.get("sentence", "").strip()
+    feedback = data.get("feedback", "").strip()  # e.g. "not_noise", "valid_term", "false_positive"
+    if not term or not feedback:
+        return jsonify({"error": "Both 'term' and 'feedback' are required."}), 400
+    entry = {
+        "term": term,
+        "sentence": sentence,
+        "feedback": feedback,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        with open(FEEDBACK_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        return jsonify({"error": f"Could not save feedback: {e}"}), 500
+    return jsonify({"status": "ok", "message": f"Feedback recorded for term '{term}'."})
 
-    return jsonify({"response": response, "detected": detected, "page_content": page_content})
-
-# -- PR Handler ----------------------------------------------------------
-
-def handle_pr(user_msg: str, prs: list[dict]):
-    target = prs[0]
-    label = f'{target["owner"]}/{target["repo"]}#{target["pr_number"]}'
-    detected = [f"pr:{label}"]
-
-    # Use MCP review tool -- it reviews AND posts comments automatically
-    print(f"[DEBUG] Starting PR review for {label}", flush=True)
-    result = mcp_client.call_tool("review_pull_request_tool", {
-        "repo": target["repo"],
-        "pr_number": target["pr_number"],
-        "checklist": [],
+# --- PR Review Panel API ---
+@app.route("/api/pr-checklist", methods=["GET"])
+def get_pr_checklist():
+    """GET /api/pr-checklist - returns default PR review checklist."""
+    checklist = _get_cached_pr_checklist()
+    return jsonify({
+        "checklist": [
+            {"name": item.get("name"), "id": item.get("id")}
+            for item in checklist
+        ]
     })
-    print(f"[DEBUG] PR review result: {str(result)[:200]}", flush=True)
 
-    if not result.get("success"):
-        return jsonify({"error": result.get("error", "PR review failed"), "detected": detected}), 502
+@app.route("/api/parse-pr", methods=["POST"])
+def parse_pr():
+    """POST /api/parse-pr - parses a GitHub PR URL."""
+    data = request.get_json(silent=True) or {}
+    url = data.get("url", "").strip()
+    
+    match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
+    if not match:
+        return jsonify({"error": "Invalid PR URL format"}), 400
+    
+    owner, repo, pr_number = match.groups()
+    return jsonify({
+        "success": True,
+        "owner": owner,
+        "repo": repo,
+        "pr_number": int(pr_number),
+        "url": url
+    })
 
-    review_data = result.get("data", {})
-    summary = f"Review completed for {label}.\n\n{format_result(review_data)}"
 
-    return jsonify({"response": summary, "detected": detected, "mcp_review": review_data})
+@app.route("/api/review-stream", methods=["POST"])
+def review_stream():
+    """POST /api/review-stream - streams PR review progress as Server-Sent Events."""
+    data = request.get_json(silent=True) or {}
+    user_msg = data.get("prompt", "").strip()
+    panel_checklist = data.get("checklist", [])
+    user_auth = normalize_user_auth(data.get("user_auth", {}))
+    github_base_url = data.get("github_base_url")  # Extracted from the link by frontend
+
+    if not user_msg:
+        return jsonify({"error": "Empty prompt"}), 400
+
+    def generate():
+        def send_event(event_type, message):
+            
+            return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+        
+        # Check credentials upfront
+        if not user_auth or not user_auth.get("github_owner") or not user_auth.get("github_token"):
+            yield send_event("error", "GitHub credentials not configured. Please set them up in Account Settings.")
+            return
+
+        yield send_event("progress", "Parsing PR link...")
+
+        prs = _extract_prs_from_text(user_msg)
+        if not prs:
+            yield send_event("error", "No GitHub PR link found in your message.")
+            return
+
+        pr = prs[0]
+        repo_full = f"{pr['owner']}/{pr['repo']}"
+        pr_num = pr['pr_number']
+
+        yield send_event("progress", f"Detected PR: {repo_full}#{pr_num}")
+
+        # --- Step 1: Fetch changed files (cached to avoid duplicate API calls) ---
+        yield send_event("progress", "Fetching changed files...")
+        try:
+            file_list, from_cache = _get_cached_pr_files(repo_full, pr_num, user_auth, github_base_url)
+            if isinstance(file_list, list) and file_list:
+                cache_note = " (cached)" if from_cache else ""
+                yield send_event("progress", f"Found {len(file_list)} changed file(s){cache_note}")
+                for f_obj in file_list[:15]:
+                    fname = f_obj.get("filename", "") if isinstance(f_obj, dict) else str(f_obj)
+                    if fname:
+                        add = int(f_obj.get("additions", 0) or 0) if isinstance(f_obj, dict) else 0
+                        delete = int(f_obj.get("deletions", 0) or 0) if isinstance(f_obj, dict) else 0
+                        yield send_event("progress", f"  • {fname} (+{add}/-{delete})")
+                if len(file_list) > 15:
+                    yield send_event("progress", f"  ... and {len(file_list)-15} more file(s)")
+            else:
+                yield send_event("progress", "Could not list files, continuing...")
+        except Exception as e:
+            yield send_event("progress", f"File listing error: {e}")
+            file_list = []
+        # --- Step 2: Run the full review tool in a background thread ---
+        yield send_event("progress", "Running checklist analysis (flake8, conventions, consistency)...")
+        yield send_event("progress", "This step analyzes all files and posts comments — please wait...")
+
+        result_queue = queue.Queue()
+        if panel_checklist:
+            checklist = _build_checklist_from_panel(panel_checklist)
+        else:
+            checklist = _get_cached_pr_checklist()
+
+        total_changed_lines = sum(
+            int(f.get("additions", 0) or 0) + int(f.get("deletions", 0) or 0)
+            for f in (file_list or [])
+            if isinstance(f, dict)
+        )
+        # High-confidence mode is enforced: never defer checks for speed.
+        large_pr = len(file_list or []) >= 25 or total_changed_lines >= 1800
+        if checklist and large_pr:
+            yield send_event(
+                "progress",
+                "High-confidence mode active: running full checklist on a large PR.",
+            )
+
+        # Track how many stderr lines we've already sent so we only send new ones
+        _stderr_read_idx = len(mcp_client.stderr_lines)
+
+        # High-confidence mode is enforced for PR reviews.
+        _skip_inline = False
+        _skip_footer = False
+        _max_inline_comments = _STRICT_INLINE_COMMENT_LIMIT
+        _group_similar_inline = True
+
+        def _run_review():
+            try:
+                review_args = {
+                    "repo": repo_full,
+                    "pr_number": int(pr_num),
+                    "checklist": checklist,
+                    "skip_inline": _skip_inline,
+                    "skip_footer": _skip_footer,
+                    "max_inline_comments": _max_inline_comments,
+                    "group_similar_inline": _group_similar_inline,
+                    "__user_auth": user_auth,
+                }
+                if github_base_url:
+                    review_args["__github_base_url"] = github_base_url
+
+                review_key = _make_review_coalesce_key(
+                    repo_full,
+                    int(pr_num),
+                    checklist=checklist,
+                    skip_inline=_skip_inline,
+                    skip_footer=_skip_footer,
+                    max_inline_comments=_max_inline_comments,
+                    group_similar_inline=_group_similar_inline,
+                    github_base_url=github_base_url,
+                )
+
+                def _invoke_review():
+                    return TOOL_REGISTRY["review_pull_request_tool"](review_args)
+
+                result, reused_inflight, waited_s = _run_review_with_coalescing(review_key, _invoke_review)
+                result_queue.put(("ok", {
+                    "result": result,
+                    "reused_inflight": reused_inflight,
+                    "waited_s": waited_s,
+                }))
+            except Exception as e:
+                result_queue.put(("error", str(e)))
+
+        review_thread = threading.Thread(target=_run_review, daemon=True)
+        started_at = time.time()
+        review_thread.start()
+
+        _inline_count = 0
+        _last_heartbeat = -1
+        while review_thread.is_alive():
+            review_thread.join(timeout=1)
+            # Read new [REVIEW] messages from MCP server stderr
+            new_lines = mcp_client.stderr_lines[_stderr_read_idx:]
+            _stderr_read_idx = len(mcp_client.stderr_lines)
+            sent_any = False
+            for line in new_lines:
+                if "[REVIEW]" in line:
+                    cleaned = _clean_review_line(line)
+                    if cleaned is not None:
+                        yield send_event("progress", cleaned)
+                        sent_any = True
+                    elif "Inline comment posted" in line:
+                        _inline_count += 1
+            if not review_thread.is_alive():
+                break
+            # Heartbeat every ~10s if no log messages
+            elapsed = int(time.time() - started_at)
+            heartbeat_bucket = elapsed // 10
+            if not sent_any and heartbeat_bucket > _last_heartbeat:
+                _last_heartbeat = heartbeat_bucket
+                yield send_event("progress", f"  \u23f3 Still working... ({elapsed}s elapsed)")
+
+        # Drain any remaining stderr lines after thread finishes
+        for line in mcp_client.stderr_lines[_stderr_read_idx:]:
+            if "[REVIEW]" in line:
+                cleaned = _clean_review_line(line)
+                if cleaned is not None:
+                    yield send_event("progress", cleaned)
+                elif "Inline comment posted" in line:
+                    _inline_count += 1
+        if _inline_count > 0:
+            yield send_event("progress", f"  Posted {_inline_count} inline comment(s)")
+
+        elapsed_s = time.time() - started_at
+
+        # Get the result
+        try:
+            status, payload = result_queue.get_nowait()
+        except queue.Empty:
+            yield send_event("error", "Review thread completed but produced no result.")
+            return
+
+        if status == "error":
+            yield send_event("error", f"Review tool crashed: {payload}")
+            return
+
+        reused_inflight = False
+        waited_s = 0.0
+        result = payload
+        if isinstance(payload, dict) and "result" in payload:
+            result = payload.get("result")
+            reused_inflight = bool(payload.get("reused_inflight", False))
+            try:
+                waited_s = float(payload.get("waited_s", 0.0) or 0.0)
+            except Exception:
+                waited_s = 0.0
+
+        if isinstance(result, dict) and result.get("success"):
+            data_r = result.get("data", {})
+            summary = data_r.get("summary", "") if isinstance(data_r, dict) else str(data_r)
+            reviewed = data_r.get("reviewed_items", []) if isinstance(data_r, dict) else []
+            flake8_v = data_r.get("flake8_violations", 0) if isinstance(data_r, dict) else 0
+            conv_v = data_r.get("convention_issues", 0) if isinstance(data_r, dict) else 0
+            consist_v = data_r.get("consistency_issues", 0) if isinstance(data_r, dict) else 0
+            inline_posted = data_r.get("inline_comments_posted", 0) if isinstance(data_r, dict) else 0
+            inline_total = data_r.get("inline_candidates_total", 0) if isinstance(data_r, dict) else 0
+            inline_selected = data_r.get("inline_candidates_selected", 0) if isinstance(data_r, dict) else 0
+
+            yield send_event("progress", f"\u2705 Review complete in {elapsed_s:.1f}s")
+            if reused_inflight:
+                yield send_event("progress", f"  Reused in-flight result for duplicate request (waited {waited_s:.1f}s)")
+            if flake8_v > 0:
+                yield send_event("progress", f"  Flake8 violations: {flake8_v}")
+            if conv_v > 0:
+                yield send_event("progress", f"  Convention issues: {conv_v}")
+            if consist_v > 0:
+                yield send_event("progress", f"  Consistency issues: {consist_v}")
+            if inline_posted > 0:
+                yield send_event("progress", f"  Inline comments posted: {inline_posted}")
+            if inline_total > inline_selected:
+                yield send_event("progress", f"  Inline candidates reduced: {inline_total} -> {inline_selected} (grouped/capped)")
+
+            lines = [f"Completed PR review for {repo_full}#{pr_num} in {elapsed_s:.1f}s."]
+            if reviewed:
+                lines.append(f"Reviewed: {', '.join(reviewed)}")
+            if summary:
+                lines.append(summary)
+            else:
+                lines.append("Review comments (inline + summary) have been posted to the PR.")
+            yield send_event("done", "\n".join(lines))
+        else:
+            error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
+            yield send_event("error", f"Review failed: {error}")
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        direct_passthrough=False,
+    )
 
 
+
+# --- SSE Confluence Review Stream Endpoint ---
+@app.route("/api/confluence-review-stream", methods=["POST"])
+def confluence_review_stream():
+    """POST /api/confluence-review-stream - streams Confluence page review progress as SSE."""
+    data = request.get_json(silent=True) or {}
+    page_id = (data.get("page_id") or "").strip()
+    page_input = (data.get("page_input") or "").strip()
+    doc_type = (data.get("doc_type") or "").strip()
+    checklist = data.get("checklist", [])
+    outputs = data.get("outputs", [])
+    user_auth = normalize_user_auth(data.get("user_auth", {}))
+    confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist)
+    confluence_base_url = data.get("confluence_base_url")  # Extracted from the link by frontend
+
+    if not page_id and not page_input:
+        return jsonify({"error": "No page ID or URL provided"}), 400
+
+    def generate():
+        def send_event(event_type, message):
+            return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+                # Check credentials upfront
+        
+        if not user_auth or not user_auth.get("confluence_email") or not user_auth.get("confluence_api_token"):
+            yield send_event("error", "Confluence credentials not configured. Please set them up in Account Settings.")
+            return
+
+        yield send_event("progress", "Parsing Confluence page input...")
+
+        # Use page_id if available, otherwise extract from page_input
+        resolved_id = page_id
+        if not resolved_id:
+            m = re.search(r'pages/(\d+)', page_input)
+            if m:
+                resolved_id = m.group(1)
+            elif page_input.isdigit():
+                resolved_id = page_input
+
+        if not resolved_id:
+            yield send_event("error", "Could not extract a page ID from the input.")
+            return
+
+        yield send_event("progress", f"Page ID: {resolved_id}")
+
+        # --- Step 1: Fetch page content to confirm it exists ---
+        yield send_event("progress", "Fetching page content...")
+        try:
+            page_result = TOOL_REGISTRY["get_confluence_page_content"]({"page_id": resolved_id, "__user_auth": user_auth})
+            if isinstance(page_result, dict) and page_result.get("success"):
+                page_data = page_result.get("data", {})
+                title = page_data.get("title", "Unknown") if isinstance(page_data, dict) else "Unknown"
+                yield send_event("progress", f"Page found: {title}")
+            else:
+                err = page_result.get("error", "Unknown") if isinstance(page_result, dict) else str(page_result)
+                yield send_event("error", f"Could not fetch page: {err}")
+                return
+        except Exception as e:
+            yield send_event("error", f"Error fetching page: {e}")
+            return
+
+        if doc_type:
+            yield send_event("progress", f"Document type: {doc_type}")
+
+        if checklist:
+            yield send_event("progress", f"Checklist items: {len(checklist)} selected")
+
+        # --- Step 2: Run the review in a background thread ---
+        yield send_event("progress", "Starting page review with the selected checklist...")
+        yield send_event("progress", "This may take a moment — please wait...")
+
+        result_queue = queue.Queue()
+
+        # Track stderr position for reading [REVIEW] messages from MCP server
+        _stderr_read_idx = len(mcp_client.stderr_lines)
+
+        # High-confidence mode is enforced for Confluence reviews.
+        _skip_inline = False
+        _skip_footer = False
+
+        def _run_confluence_review():
+            try:
+                review_args = {"page_input": resolved_id, "checklist_page_id": confluence_checklist_page_id, "skip_inline": _skip_inline, "skip_footer": _skip_footer, "__user_auth": user_auth}
+                if confluence_base_url:
+                    review_args["__confluence_base_url"] = confluence_base_url
+                result = TOOL_REGISTRY["review_confluence_page_content"](review_args)
+                result_queue.put(("ok", result))
+            except Exception as e:
+                result_queue.put(("error", str(e)))
+
+        review_thread = threading.Thread(target=_run_confluence_review, daemon=True)
+        started_at = time.time()
+        review_thread.start()
+
+        _inline_count = 0
+        _last_heartbeat = -1
+        while review_thread.is_alive():
+            review_thread.join(timeout=1)
+            # Read new [REVIEW] messages from MCP server stderr
+            new_lines = mcp_client.stderr_lines[_stderr_read_idx:]
+            _stderr_read_idx = len(mcp_client.stderr_lines)
+            sent_any = False
+            for line in new_lines:
+                if "[REVIEW]" in line:
+                    cleaned = _clean_review_line(line)
+                    if cleaned is not None:
+                        yield send_event("progress", cleaned)
+                        sent_any = True
+                    elif "Inline comment posted" in line:
+                        _inline_count += 1
+            if _inline_count > 0 and _inline_count % 10 == 0:
+                yield send_event("progress", f"  Posted {_inline_count} inline comment(s) so far...")
+                sent_any = True
+            if not review_thread.is_alive():
+                break
+            # Heartbeat every ~10s if no log messages
+            elapsed = int(time.time() - started_at)
+            heartbeat_bucket = elapsed // 10
+            if not sent_any and heartbeat_bucket > _last_heartbeat:
+                _last_heartbeat = heartbeat_bucket
+                yield send_event("progress", f"  \u23f3 Still working... ({elapsed}s elapsed)")
+
+        # Drain any remaining stderr lines after thread finishes
+        for line in mcp_client.stderr_lines[_stderr_read_idx:]:
+            if "[REVIEW]" in line:
+                cleaned = _clean_review_line(line)
+                if cleaned is not None:
+                    yield send_event("progress", cleaned)
+                elif "Inline comment posted" in line:
+                    _inline_count += 1
+        if _inline_count > 0:
+            yield send_event("progress", f"  Posted {_inline_count} inline comment(s)")
+
+        elapsed_s = time.time() - started_at
+
+        try:
+            status, payload = result_queue.get_nowait()
+        except queue.Empty:
+            yield send_event("error", "Review thread completed but produced no result.")
+            return
+
+        if status == "error":
+            yield send_event("error", f"Review failed: {payload}")
+            return
+
+        reused_inflight = False
+        waited_s = 0.0
+        result = payload
+        if isinstance(payload, dict) and "result" in payload:
+            result = payload.get("result")
+            reused_inflight = bool(payload.get("reused_inflight", False))
+            try:
+                waited_s = float(payload.get("waited_s", 0.0) or 0.0)
+            except Exception:
+                waited_s = 0.0
+
+        if isinstance(result, dict) and result.get("success"):
+            data_r = result.get("data", {})
+            if isinstance(data_r, dict):
+                summary = data_r.get("summary", "")
+                total_issues = int(data_r.get("issues_found", data_r.get("total_issues", 0)) or 0)
+                inline_posted = int(data_r.get("comments_posted", data_r.get("inline_comments_posted", 0)) or 0)
+                inline_failed = int(data_r.get("inline_failures_count", 0) or 0)
+                footer_posted = bool(data_r.get("footer_posted", data_r.get("footer_comment_posted", False)))
+                executed_checks = list(data_r.get("executed_checks", []) or [])
+                skipped_checks = list(data_r.get("skipped_checks", []) or [])
+            else:
+                summary = str(data_r)
+                total_issues = 0
+                inline_posted = 0
+                inline_failed = 0
+                footer_posted = False
+                executed_checks = []
+                skipped_checks = []
+
+            yield send_event("progress", f"\u2705 Review complete in {elapsed_s:.1f}s")
+            if reused_inflight:
+                yield send_event("progress", f"  Reused in-flight result for duplicate request (waited {waited_s:.1f}s)")
+            if total_issues > 0:
+                yield send_event("progress", f"  Issues found: {total_issues}")
+            else:
+                yield send_event("progress", "  No issues were found for the selected checklist")
+            yield send_event("progress", f"  Inline comments posted: {inline_posted}")
+            if inline_failed > 0:
+                yield send_event("progress", f"  Inline comments failed: {inline_failed}")
+            elif total_issues == 0:
+                yield send_event("progress", "  No inline comments were posted because no findings required them")
+            if footer_posted:
+                yield send_event("progress", "  Footer summary posted to page")
+            else:
+                yield send_event("progress", "  Footer summary was not posted")
+            if executed_checks:
+                yield send_event("progress", "  Executed checks: " + ", ".join(str(item) for item in executed_checks))
+            if skipped_checks:
+                skipped_text = ", ".join(f"{item.get('id', 'unknown')} ({item.get('reason', 'skipped')})" for item in skipped_checks[:5])
+                yield send_event("progress", "  Skipped checks: " + skipped_text)
+
+            lines = [f"Completed Confluence page review for page {resolved_id} in {elapsed_s:.1f}s."]
+            lines.append(f"Issues found: {total_issues}.")
+            lines.append(f"Inline comments posted: {inline_posted}.")
+            if inline_failed > 0:
+                lines.append(f"Inline comments failed: {inline_failed}.")
+            elif total_issues == 0:
+                lines.append("No inline comments were needed because the selected checks found no issues.")
+            lines.append("Footer summary posted to the page." if footer_posted else "Footer summary could not be posted to the page.")
+            if executed_checks:
+                lines.append("Executed checks: " + ", ".join(str(item) for item in executed_checks) + ".")
+            if skipped_checks:
+                skipped_text = ", ".join(f"{item.get('id', 'unknown')} ({item.get('reason', 'skipped')})" for item in skipped_checks[:5])
+                lines.append("Skipped checks: " + skipped_text + ".")
+            if summary:
+                lines.append(summary)
+            yield send_event("done", "\n".join(lines))
+        else:
+            error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
+            yield send_event("error", f"Review failed: {error}")
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        direct_passthrough=False,
+    )
+
+# --- Shutdown Handler ---
 atexit.register(lambda: mcp_client.shutdown())
 
+# --- Main Entry Point ---
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000, threaded=True)

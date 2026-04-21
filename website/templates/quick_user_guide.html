@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Guide - MunnAI</title>
+    <style>
+        :root {
+            --ink: #1a1c23;
+            --muted: #5a6072;
+            --card: #efe1e9;
+            --bg-a: #eec8f7;
+            --bg-b: #fec4ea;
+            --line: #d7deeb;
+            --primary: #b10fa7;
+            --primary-2: #f491d8;
+            --accent-soft: #e679d9;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(1200px 600px at 8% -20%, #dff2ff 0%, transparent 56%),
+                radial-gradient(1000px 520px at 95% -10%, #efe4ff 0%, transparent 58%),
+                linear-gradient(150deg, var(--bg-a) 0%, var(--bg-b) 100%);
+            min-height: 100vh;
+            padding: 26px 16px 40px;
+        }
+
+        .guide-shell {
+            max-width: 1040px;
+            margin: 0 auto;
+            display: grid;
+            gap: 16px;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, #ffffff 0%, #f8f4ff 100%);
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            padding: 22px;
+            box-shadow: 0 18px 34px rgba(20, 26, 52, 0.12);
+        }
+
+        .hero h1 {
+            margin: 0 0 8px;
+            font-size: clamp(1.5rem, 2.7vw, 2.1rem);
+            letter-spacing: -0.02em;
+        }
+
+        .hero p {
+            margin: 0;
+            color: var(--muted);
+            max-width: 760px;
+            line-height: 1.6;
+        }
+
+        .hero-actions {
+            margin-top: 14px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            border: 1px solid transparent;
+            padding: 10px 14px;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .btn.primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-2));
+            color: #fff;
+        }
+
+        .btn.secondary {
+            background: #fff;
+            border-color: var(--line);
+            color: var(--ink);
+        }
+
+        .feature-grid {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+
+        .feature-card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+        }
+
+        .feature-card h2 {
+            margin: 0 0 6px;
+            font-size: 1rem;
+        }
+
+        .feature-card p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .main-grid {
+            display: grid;
+            gap: 16px;
+            grid-template-columns: 1.5fr 1fr;
+        }
+
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 18px;
+            box-shadow: 0 10px 24px rgba(15, 20, 42, 0.08);
+        }
+
+        .panel h3 {
+            margin: 0 0 10px;
+            font-size: 1.05rem;
+        }
+
+        .panel p,
+        .panel li {
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .flow-list {
+            margin: 0;
+            padding-left: 18px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .tip {
+            background: var(--accent-soft);
+            border: 1px dashed #b9c8f6;
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-size: 0.9rem;
+        }
+
+        pre {
+            margin: 0;
+            background: #0e1528;
+            color: #f3f6ff;
+            border-radius: 12px;
+            border: 1px solid #273659;
+            padding: 12px;
+            overflow-x: auto;
+            font-size: 0.83rem;
+            line-height: 1.45;
+        }
+
+        @media (max-width: 940px) {
+            .feature-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 620px) {
+            body { padding: 16px 10px 28px; }
+            .hero, .panel { padding: 14px; }
+            .feature-grid { grid-template-columns: 1fr; }
+            .hero-actions { flex-direction: column; }
+            .btn { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <main class="guide-shell">
+        <section class="hero">
+            <h1>MunnAI User Guide</h1>
+            <p>Run fast, structured reviews for GitHub pull requests and Confluence pages, then publish actionable comments with less manual effort.</p>
+            <div class="hero-actions">
+                <a class="btn primary" href="/">Launch MunnAI</a>
+                <a class="btn secondary" href="/">Back to Workspace</a>
+            </div>
+        </section>
+
+        <section class="feature-grid">
+            <article class="feature-card">
+                <h2>PR Review Automation</h2>
+                <p>Parse PR links, inspect changed files, and run checklist-driven quality checks. Posts inline comments and a footer summary automatically.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Coding Standards Enforcement</h2>
+                <p>Detects naming convention violations (PascalCase, camelCase, snake_case), formatting issues, structural problems, and cross-file consistency gaps.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Custom Review Instructions</h2>
+                <p>Paste your own checklist or rules in chat before reviewing a PR. MunnAI merges them with built-in checks and applies every rule to the review.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Confluence Content Review</h2>
+                <p>Review pages for readability, grammar, and structure, with inline and footer outputs.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Developer Learning Feedback</h2>
+                <p>Every inline comment explains the issue, the violated rule, and a specific fix — so developers understand why, not just what.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Standardized Output Format</h2>
+                <p>All findings follow a consistent Issue / Rule / Fix format, ensuring reviewers and developers get uniform, actionable feedback every time.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Runtime Credentials</h2>
+                <p>Configure per-user GitHub and Confluence credentials in Account Setup with token visibility toggles.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Live Progress Stream</h2>
+                <p>Track each review step in real time from request start to completion.</p>
+            </article>
+        </section>
+
+        <section class="main-grid">
+            <article class="panel">
+                <h3>Recommended Workflow</h3>
+                <ol class="flow-list">
+                    <li>Open <strong>Account Setup</strong> and fill GitHub owner/token plus Confluence email/token.</li>
+                    <li>Choose <strong>GitHub PR Review</strong> or <strong>Confluence Page Review</strong> from the sidebar.</li>
+                    <li>Paste the PR or page link, then click <strong>Parse</strong> to validate input.</li>
+                    <li>Select checklist rules and expected outputs, or paste custom instructions in chat.</li>
+                    <li>Start review and monitor streamed progress in chat.</li>
+                    <li>Inline comments and a footer summary are posted automatically to the PR or page.</li>
+                </ol>
+
+                <h3>Applying Custom Instructions to a PR</h3>
+                <p>Paste your own checklist or rules in chat before starting a review. MunnAI reads them and extends the standard checklist automatically.</p>
+                <div class="tip">Example: "Use this checklist for my next review: validate naming consistency, flag long lines, report security patterns. Expected output: inline comments + summary with top risks."</div>
+
+                <h3>What Gets Checked Automatically</h3>
+                <ul class="flow-list">
+                    <li>Naming conventions: PascalCase classes, camelCase JS/TS, snake_case Python</li>
+                    <li>Consistent formatting and indentation across changed files</li>
+                    <li>Cross-file consistency (naming, patterns, behavior alignment)</li>
+                    <li>Security risks: hardcoded secrets, missing validation, SQL/XSS</li>
+                    <li>Code quality: DRY violations, unused variables, complex functions</li>
+                    <li>Documentation: missing docstrings, inaccurate comments</li>
+                </ul>
+            </article>
+
+            <article class="panel">
+                <h3>Prompt Template</h3>
+                <pre>Use this checklist for my next review:
+- Validate naming consistency
+- Flag long lines and unclear comments
+- Report security-sensitive patterns
+- Check cross-file naming alignment
+Expected output:
+- Inline comments for exact lines
+- One summary comment with top risks</pre>
+
+                <h3 style="margin-top:14px;">Inline Comment Format</h3>
+                <pre>Issue: Function name uses PascalCase
+Rule: JS/TS functions must use camelCase
+Fix: Rename getUser() to getUser (already correct)
+     rename CreateUser() to createUser()</pre>
+
+                <h3 style="margin-top:14px;">Fast Tips</h3>
+                <ul class="flow-list">
+                    <li>Use Ctrl+Enter to send chat messages quickly.</li>
+                    <li>Paste custom rules in chat before starting a review.</li>
+                    <li>Click outside a panel or modal to close it.</li>
+                    <li>If parsing fails, verify the PR or page link format first.</li>
+                </ul>
+            </article>
+        </section>
+    </main>
+</body>
+</html>

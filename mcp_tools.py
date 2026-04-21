@@ -6,6 +6,7 @@ from mcp_calls import (
     create_space,
     create_page,
     update_page,
+    find_and_replace_in_page,
     get_page_content,
     get_page_content_by_sections,
     review_confluence_page,
@@ -24,6 +25,7 @@ from mcp_calls import (
     reply_comment,
     review_pull_request,
     cleanup_old_bot_comments,
+    set_runtime_auth,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,42 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 mcp = FastMCP("Confluence MCP Server")
+
+@mcp.tool(
+    description="""
+Set runtime credentials for Confluence and GitHub calls.
+
+Use this before other tools when requests should run under user-specific accounts.
+
+Args:
+- confluence_email (str, optional)
+- confluence_api_token (str, optional)
+- confluence_base_url (str, optional)
+- github_owner (str, optional)
+- github_token (str, optional)
+- github_base_url (str, optional)
+
+Returns:
+- dict: {"success": True, "data": {...}} if credentials were applied
+        {"success": False, "error": "..."} on failure
+"""
+)
+def set_runtime_auth_tool(
+    confluence_email: str = "",
+    confluence_api_token: str = "",
+    confluence_base_url: str = "",
+    github_owner: str = "",
+    github_token: str = "",
+    github_base_url: str = "",
+):
+    return set_runtime_auth(
+        confluence_email=confluence_email,
+        confluence_api_token=confluence_api_token,
+        confluence_base_url=confluence_base_url,
+        github_owner=github_owner,
+        github_token=github_token,
+        github_base_url=github_base_url,
+    )
 
 @mcp.tool(
     description="""
@@ -94,6 +132,32 @@ def update_confluence_page(page_id: str, title: str, content: str, version: int,
 
 @mcp.tool(
     description="""
+Safely find and replace text in a Confluence page WITHOUT losing any existing content.
+
+This is the PREFERRED tool for text replacements. It automatically:
+- Fetches the full page content
+- Performs the find/replace
+- Saves the complete page back (preserving all other content)
+- Handles version conflicts
+
+Use this instead of update_confluence_page when you need to replace specific text.
+
+Args:
+ - page_id (str): The ID of the page.
+ - find_text (str): The exact text to find.
+ - replace_text (str): The text to replace it with.
+ - replace_all (bool, optional): If True (default), replaces ALL occurrences. If False, replaces only the first.
+
+Returns:
+ - dict: {"success": True, "data": {"message": "...", "replacements": N}} if successful
+         {"success": False, "error": "error message"} if it fails
+"""
+)
+def find_and_replace_in_confluence_page(page_id: str, find_text: str, replace_text: str, replace_all: bool = True):
+    return find_and_replace_in_page(page_id, find_text, replace_text, replace_all)
+
+@mcp.tool(
+    description="""
 Retrieve the content of a Confluence page by sections for easier reading of Co-pilot for reviews
 
 Args:
@@ -104,7 +168,7 @@ Returns:
          {"success": False, "error": "error message"} if retrieval fails
 """
 )
-def get_page_content_by_sections_tool(page_id: str, chunk_size: int = 2500, max_sections: int = 5):
+def get_page_content_by_sections_tool(page_id: str, chunk_size: int = 2500, max_sections: int = 50):
     return get_page_content_by_sections(page_id, chunk_size, max_sections)
 
 @mcp.tool(
@@ -141,9 +205,9 @@ Returns:
          {"success": False, "error": "..."} if review fails
 """
 )
-def review_confluence_page_content(page_id: str = "", page_input: str = "", checklist_page_id: str = ""):
+def review_confluence_page_content(page_id: str = "", page_input: str = "", checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False):
     source = page_input or page_id
-    return review_confluence_page(source, "", checklist_page_id)
+    return review_confluence_page(source, "", checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer)
 
 @mcp.tool(
     description="""
@@ -172,14 +236,15 @@ Args:
  - page_id (str): The ID of the page to comment on.
  - comment (str): The text of the comment.
  - text_selection (str): The exact text to attach the comment to.
+ - match_index (int, optional): 0-based occurrence index to target when text appears multiple times.
 
 Returns:
  - dict: {"success": True, "data": {...}} if comment is posted
          {"success": False, "error": "error message"} if posting fails
 """
 )
-def post_confluence_inline_comment(page_id: str, comment: str, text_selection: str):
-    return post_inline_comment(page_id, comment, text_selection)
+def post_confluence_inline_comment(page_id: str, comment: str, text_selection: str, match_index: int | None = None):
+    return post_inline_comment(page_id, comment, text_selection, match_index=match_index)
 
 @mcp.tool(description="""
 Lists all repositories accessible to the authenticated user.
@@ -422,11 +487,21 @@ def reply_comment_tool(repo: str, pr_number: int, comment_id: int, reply_text: s
           ]
           result = review_pull_request_tool("my-repo", 42, checklist)
           """)
-def review_pull_request_tool(repo: str, pr_number: int, checklist: list):
+def review_pull_request_tool(repo: str, pr_number: int, checklist: list, skip_inline: bool = False, skip_footer: bool = False, max_inline_comments: int = 6, group_similar_inline: bool = True):
     """
     Executes a comprehensive pull request review based on the provided checklist.
+    skip_inline: If True, skip posting inline comments on specific lines.
+    skip_footer: If True, skip posting the footer summary comment.
     """
-    return review_pull_request(repo, pr_number, checklist)
+    return review_pull_request(
+        repo,
+        pr_number,
+        checklist,
+        skip_inline=skip_inline,
+        skip_footer=skip_footer,
+        max_inline_comments=max_inline_comments,
+        group_similar_inline=group_similar_inline,
+    )
 
 @mcp.tool(description=
           """

@@ -1,7 +1,10 @@
+import concurrent.futures
+import html
 import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import Counter, defaultdict
 from typing import Any, Dict, Optional, Tuple
@@ -9,9 +12,80 @@ from typing import Any, Dict, Optional, Tuple
 import config
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+_stderr_handler = logging.StreamHandler()
+_stderr_handler.setLevel(logging.INFO)
+_stderr_handler.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_stderr_handler)
 
 class ReviewActions:
     """Review orchestration, checks, and evaluation logic."""
+
+
+    @staticmethod
+    def _calculate_flesch_reading_ease(text: str) -> float:
+        """Calculate Flesch Reading Ease score. Higher = easier to read (0-100+)."""
+        sentences = len([s for s in text.split('.') if s.strip()])
+        if sentences == 0:
+            return 0.0
+        
+        words = text.split()
+        word_count = len(words)
+        if word_count == 0:
+            return 0.0
+        
+        def count_syllables(word):
+            word = word.lower()
+            vowels = 'aeiouy'
+            syllable_count = 0
+            previous_was_vowel = False
+            for char in word:
+                is_vowel = char in vowels
+                if is_vowel and not previous_was_vowel:
+                    syllable_count += 1
+                previous_was_vowel = is_vowel
+            if word.endswith('e'):
+                syllable_count -= 1
+            if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+                syllable_count += 1
+            return max(1, syllable_count)
+        
+        syllable_count = sum(count_syllables(w) for w in words)
+        fre = 206.835 - 1.015 * (word_count / sentences) - 84.6 * (syllable_count / word_count)
+        return max(0, min(100, fre))
+
+    @staticmethod
+    def _calculate_flesch_kincaid_grade(text: str) -> float:
+        """Calculate Flesch-Kincaid Grade Level (US grade)."""
+        sentences = len([s for s in text.split('.') if s.strip()])
+        if sentences == 0:
+            return 0.0
+        
+        words = text.split()
+        word_count = len(words)
+        if word_count == 0:
+            return 0.0
+        
+        def count_syllables(word):
+            word = word.lower()
+            vowels = 'aeiouy'
+            syllable_count = 0
+            previous_was_vowel = False
+            for char in word:
+                is_vowel = char in vowels
+                if is_vowel and not previous_was_vowel:
+                    syllable_count += 1
+                previous_was_vowel = is_vowel
+            if word.endswith('e'):
+                syllable_count -= 1
+            if word.endswith('le') and len(word) > 2 and word[-3] not in vowels:
+                syllable_count += 1
+            return max(1, syllable_count)
+        
+        syllable_count = sum(count_syllables(w) for w in words)
+        grade = 0.39 * (word_count / sentences) + 11.8 * (syllable_count / word_count) - 15.59
+        return max(0, grade)
+
 
     def __init__(self, confluence_api, syntax_actions):
         """Store references to API and syntax modules."""
@@ -71,7 +145,17 @@ class ReviewActions:
         original_position: Optional[int] = None,
     ) -> None:
         """Try to post an inline comment with candidate expansion and state tracking."""
-        time.sleep(0.3)
+        # If deferring, queue for later (footer posts first)
+        if state.get("_defer_inline"):
+            state["_deferred_inlines"].append({
+                "page_id": page_id,
+                "comment": comment,
+                "anchors": list(anchors),
+                "original_position": original_position,
+            })
+            return
+
+        time.sleep(0.05)
 
         # Fetch page text once (cached in state to avoid repeat fetches across calls)
         page_text = state.get("_cached_page_text")
@@ -103,9 +187,11 @@ class ReviewActions:
             )
             if result is not None and not error:
                 state["comments_posted"] += 1
+                logger.info("[REVIEW] Inline comment posted (anchor=%s)", option[:80])
                 return True
             if error:
                 last_error = error
+                logger.debug("[REVIEW] Inline anchor failed: %s | error: %s", option[:60], error)
             return False
 
         # Phase 1: try each raw anchor as-is
@@ -129,6 +215,7 @@ class ReviewActions:
                     fallback_anchor = normalized
                     break
 
+        logger.warning("[REVIEW] Inline comment failed after %d attempts | comment: %s | last_error: %s", len(attempted), comment[:80], last_error or "No matching anchor")
         state["inline_failures"].append({
             "comment": comment,
             "error": last_error or "No matching anchor found",
@@ -141,15 +228,19 @@ class ReviewActions:
 
     def _run_grammar_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Run grammar and spelling checks, then record or post the findings."""
+        logger.info("[REVIEW] Running grammar check for page %s (%d chars)", page_id, len(text))
         result, error = self.syntax._collect_language_issues_adaptive(text)
         if error:
+            logger.warning("[REVIEW] Grammar check error: %s", error)
             state["footer_notes"].append(error)
             return
 
         if not result:
+            logger.info("[REVIEW] Grammar check: no issues found")
             return
 
         state["language_issues_found"] = int(result.get("issues_found", 0))
+        logger.info("[REVIEW] Grammar check found %d issues", state["language_issues_found"])
         for issue in result.get("issues", []):
             issue_type = str(issue.get("type", "grammar") or "grammar").lower()
             if issue_type not in {"grammar", "misspelling", "typographical", "style"}:
@@ -192,16 +283,17 @@ class ReviewActions:
 
     def _run_context_noise_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Detect suspicious tokens or malformed terms that may need manual review."""
+        logger.info("[REVIEW] Running context_noise check")
         seen = set()
 
-        # Pattern 1: Original — very long words (18+ chars) or words with embedded digits
+        # Pattern 1: Original - very long words (18+ chars) or words with embedded digits
         pattern_long = re.compile(r"\b(?:[A-Za-z]{18,}|[A-Za-z]*\d[A-Za-z]\w*)\b")
 
-        # Pattern 2: Short garbled words — 4+ consecutive consonants (not in known patterns)
+        # Pattern 2: Short garbled words - 4+ consecutive consonants (not in known patterns)
         # Catches: "ngeks", "adwasd", "kjasdkas", "iadawdasdasncluding"
         pattern_garble = re.compile(r"\b[a-zA-Z]*[bcdfghjklmnpqrstvwxyz]{4,}[a-zA-Z]*\b", re.IGNORECASE)
 
-        # Pattern 3: Concatenated words — lowercase letter followed by uppercase mid-word
+        # Pattern 3: Concatenated words - lowercase letter followed by uppercase mid-word
         # without a space/hyphen (e.g., "astorage", "blockbased", "objectbased")
         pattern_concat = re.compile(r"\b[a-z]+[A-Z][a-z]+\b")
 
@@ -276,6 +368,7 @@ class ReviewActions:
 
     def _run_repeated_word_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Find repeated consecutive words and flag them as readability issues."""
+        logger.info("[REVIEW] Running repeated_word check")
         pattern = re.compile(r"\b([A-Za-z']{2,})\s+\1\b", re.IGNORECASE)
         seen = set()
         for match in pattern.finditer(text):
@@ -297,6 +390,7 @@ class ReviewActions:
 
     def _run_long_sentence_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Flag long sentences that may be harder to read or review."""
+        logger.info("[REVIEW] Running long_sentence check")
         sentence_pattern = re.compile(r"[^.!?\n]+[.!?]?")
         flagged = 0
 
@@ -324,6 +418,7 @@ class ReviewActions:
 
     def _run_long_paragraph_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Flag oversized paragraphs that would benefit from being split up."""
+        logger.info("[REVIEW] Running long_paragraph check")
         paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
         flagged = 0
         for paragraph in paragraphs:
@@ -344,6 +439,7 @@ class ReviewActions:
 
     def _run_structure_check(self, storage: str, state: Dict[str, Any]) -> None:
         """Inspect heading and paragraph structure for obvious organization issues."""
+        logger.info("[REVIEW] Running structure check")
         headings = re.findall(r"<h[1-6][^>]*>", storage or "", flags=re.IGNORECASE)
         paragraphs = re.findall(r"<p[^>]*>", storage or "", flags=re.IGNORECASE)
 
@@ -365,6 +461,7 @@ class ReviewActions:
 
     def _run_statistics_validation_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Validate statistical claims: percentages, counts, breakdowns, and consistency."""
+        logger.info("[REVIEW] Running statistics_validation check")
         def _close_enough(a: float, b: float, tol: float = 0.5) -> bool:
             return abs(a - b) <= tol
 
@@ -633,6 +730,7 @@ class ReviewActions:
 
     def _run_consistency_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Check for consistency issues: spelling variations, metric values, capitalization."""
+        logger.info("[REVIEW] Running consistency check")
         term_patterns = {
             "Project X": [r"Project\s+X", r"ProjectX", r"Proj\s+X", r"project\s+x"],
             "Database": [r"\bDatabase\b", r"\bDB\b", r"\bdata base\b", r"\bdb\b"],
@@ -705,6 +803,7 @@ class ReviewActions:
     # ------------------------------------------------------------------
     def _run_citation_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Flag broken, placeholder, or inconsistent citations."""
+        logger.info("[REVIEW] Running citation check")
         # Placeholder citations
         placeholder_pats = [
             (r"\[(?:X|x|\?|citation needed|ref|TODO)\]", "Placeholder citation found"),
@@ -769,6 +868,7 @@ class ReviewActions:
 
     def _run_readability_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Compute Flesch-Kincaid readability and flag hard-to-read sections."""
+        logger.info("[REVIEW] Running readability check")
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.split()) >= 3]
         if len(sentences) < 3:
             return
@@ -840,6 +940,7 @@ class ReviewActions:
     # ------------------------------------------------------------------
     def _run_duplicate_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Detect near-duplicate paragraphs using TF-IDF cosine similarity."""
+        logger.info("[REVIEW] Running duplicate_content check")
         paragraphs = [p.strip() for p in text.split("\n\n") if len(p.split()) >= 10]
         if len(paragraphs) < 2:
             return
@@ -923,6 +1024,7 @@ class ReviewActions:
     # ------------------------------------------------------------------
     def _run_table_validation_check(self, page_id: str, storage: str, text: str, state: Dict[str, Any]) -> None:
         """Validate tables extracted from page storage HTML."""
+        logger.info("[REVIEW] Running table_validation check")
         tables = self.syntax._extract_tables_from_storage(storage)
         if not tables:
             return
@@ -1024,6 +1126,31 @@ class ReviewActions:
             {"id": "table_validation",     "execution_order": 11, "enabled": True, "required_env": ""},
         ]
 
+        if isinstance(page_id, str) and page_id.strip().upper() in {"__GRAMMAR_ONLY__", "GRAMMAR_ONLY"}:
+            return [{"id": "grammar", "execution_order": 1, "enabled": True, "required_env": ""}]
+
+        if isinstance(page_id, str) and page_id.strip().upper() in {"__STRUCTURE_HEADINGS__", "STRUCTURE_HEADINGS"}:
+            return [
+                {"id": "structure", "execution_order": 1, "enabled": True, "required_env": ""},
+                {"id": "long_sentence", "execution_order": 2, "enabled": True, "required_env": ""},
+                {"id": "long_paragraph", "execution_order": 3, "enabled": True, "required_env": ""},
+                {"id": "readability", "execution_order": 4, "enabled": True, "required_env": ""},
+            ]
+
+        if isinstance(page_id, str) and page_id.strip().upper().startswith("__CUSTOM_CHECKS__:"):
+            raw_ids = page_id.split(":", 1)[1]
+            selected_ids = []
+            for raw in raw_ids.split(","):
+                check_id = (raw or "").strip()
+                if not check_id:
+                    continue
+                selected_ids.append(check_id)
+            if selected_ids:
+                return [
+                    {"id": check_id, "execution_order": idx + 1, "enabled": True, "required_env": ""}
+                    for idx, check_id in enumerate(selected_ids)
+                ]
+
         if not page_id:
             return _DEFAULT
 
@@ -1110,7 +1237,7 @@ class ReviewActions:
         return selected
 
     def _build_footer_review_comment(self, state: Dict[str, Any]) -> str:
-        """Build the footer summary comment from the collected review findings."""
+        """Build comprehensive footer summary with readability metrics, severity breakdown, and structured analysis."""
         issue_types = Counter(issue.get("type", "unknown") for issue in state["issues"])
         total_issues = len(state["issues"])
 
@@ -1122,159 +1249,300 @@ class ReviewActions:
 
         sections = []
 
-        sections.append("<p>Review summary</p>")
-        if "doc_type" in state:
-            doc_type = state["doc_type"]
-            sections.append(f"<p>Document type: <strong>{doc_type.replace('_', ' ').title()}</strong></p>")
-
-        if total_issues == 0:
-            sections.append("<p>Result: No issues detected. Well done.</p>")
-        else:
-            # Severity based on error/warning counts, not just total
-            if errors > 5:
-                severity = "high"
-            elif errors > 0 or warnings > 5:
-                severity = "moderate"
-            else:
-                severity = "low"
-            sections.append(f"<p>Result: {total_issues} issue(s) found ({severity} severity).</p>")
-            sev_parts = []
-            if errors:
-                sev_parts.append(f"{errors} error(s)")
-            if warnings:
-                sev_parts.append(f"{warnings} warning(s)")
-            if infos:
-                sev_parts.append(f"{infos} info")
-            sections.append(f"<p>Severity breakdown: {', '.join(sev_parts)}</p>")
         type_names = {
-                "grammar": "Grammar & spelling",
-                "misspelling": "Misspelling",
-                "context_noise": "Suspicious/malformed words",
-                "repeated_word": "Repeated words",
-                "long_sentence": "Long sentences",
-                "long_paragraph": "Long paragraphs",
-                "structure": "Page structure",
-                "statistics_validation": "Data/statistics consistency",
-                "citation": "Citation & references",
-                "readability": "Readability",
-                "duplicate_content": "Duplicate content",
-                "table_validation": "Table/data validation",
-                "spelling_consistency": "Spelling consistency",
-                "capitalization_consistency": "Capitalization consistency",
-                "metric_inconsistency": "Metric inconsistency",
-            }
-        
-        # Readability score if available
-        readability = state.get("readability")
-        if readability:
-            fre = readability["flesch_ease"]
-            fkgl = readability["fk_grade"]
-            if fre >= 60:
-                level = "Easy"
-            elif fre >= 50:
-                level = "Standard"
-            elif fre >= 30:
-                level = "Difficult"
+            "grammar": "Grammar & Spelling",
+            "misspelling": "Misspelling Detection",
+            "malformed_word": "Malformed Words",
+            "repeated_word": "Repeated Words",
+            "structure": "Page Structure",
+            "heading_nesting": "Heading Nesting",
+            "acronym_expansion": "Acronym Usage",
+            "empty_section": "Empty Sections",
+            "consistency": "Writing Consistency",
+            "consistency_checks": "Writing Consistency",
+            "passive_voice": "Passive Voice",
+            "list_consistency": "List Consistency",
+            "statistics_validation": "Data Validation",
+            "context_noise": "Suspicious Text",
+            "profanity": "Profanity/Off-Topic",
+            "topic_coherence": "Topic Coherence",
+            "readability": "Readability Issues",
+            "citation": "Citation Gaps",
+            "alt_text": "Missing Alt Text",
+            "fragment": "Sentence Fragments",
+            "staleness": "Outdated References",
+            "formatting": "Excessive Formatting",
+            "long_sentence": "Long Sentences",
+            "long_paragraph": "Long Paragraphs",
+            "duplicate_content": "Duplicate Content",
+            "table_validation": "Table Issues",
+        }
+
+        type_descriptions = {
+            "grammar": "Grammar, punctuation, and spelling correctness.",
+            "misspelling": "Potentially misspelled words and typos.",
+            "malformed_word": "Suspicious or malformed tokens in the text.",
+            "repeated_word": "Consecutive duplicate words (for example, 'the the').",
+            "structure": "Section organization, heading flow, and document layout.",
+            "heading_nesting": "Heading hierarchy order (H1/H2/H3 nesting consistency).",
+            "acronym_expansion": "Whether acronyms are expanded on first use.",
+            "empty_section": "Sections with headings but little or no useful body content.",
+            "consistency": "Consistency in style, terminology, and tone.",
+            "consistency_checks": "Consistency in style, terminology, and tone.",
+            "passive_voice": "Overuse of passive constructions that reduce clarity.",
+            "list_consistency": "List formatting and bullet pattern consistency.",
+            "statistics_validation": "Plausibility and internal consistency of numeric claims.",
+            "context_noise": "Off-topic or low-signal text fragments.",
+            "profanity": "Unprofessional or inappropriate language.",
+            "topic_coherence": "Whether content remains aligned to the main topic.",
+            "readability": "Clarity and ease-of-reading concerns.",
+            "citation": "Missing references or weak source attribution.",
+            "alt_text": "Missing image alternative text for accessibility.",
+            "fragment": "Sentence fragments or incomplete thoughts.",
+            "staleness": "Potentially outdated time-sensitive references.",
+            "formatting": "Excessive or inconsistent visual formatting.",
+            "long_sentence": "Sentences that are likely too long for easy comprehension.",
+            "long_paragraph": "Dense paragraphs that may benefit from splitting.",
+            "duplicate_content": "Repeated content that can be consolidated.",
+            "table_validation": "Table structure, totals, and data consistency.",
+        }
+
+        # === HEADER ===
+        sections.append("<h3>Review Summary</h3>")
+
+        # === REQUESTED CHECKLIST (always include) ===
+        requested_check_ids = list(state.get("requested_check_ids", []) or [])
+        executed_ids = set(state.get("executed_checks", []) or [])
+        skipped_items = list(state.get("skipped_checks", []) or [])
+        skipped_map = {
+            str(item.get("id", "")).strip(): str(item.get("reason", "")).strip()
+            for item in skipped_items
+            if str(item.get("id", "")).strip()
+        }
+
+        if requested_check_ids:
+            sections.append("<p><strong>Requested Checklist:</strong></p>")
+            requested_items = []
+            for check_id in requested_check_ids:
+                label = type_names.get(check_id, check_id.replace("_", " ").title())
+                if check_id in executed_ids:
+                    requested_items.append(f"{label} (executed)")
+                elif check_id in skipped_map and skipped_map[check_id]:
+                    requested_items.append(f"{label} (skipped: {skipped_map[check_id]})")
+                else:
+                    requested_items.append(f"{label} (not run)")
+            items_html = "".join(f"<li>{html.escape(item)}</li>" for item in requested_items)
+            sections.append(f"<ul>{items_html}</ul>")
+        else:
+            sections.append("<p><strong>Requested Checklist:</strong> Default checklist was applied.</p>")
+
+        doc_type = str(state.get("doc_type", "")).strip()
+        if doc_type:
+            sections.append(f"<p><strong>Document:</strong> {html.escape(doc_type.replace('_', ' ').title())}</p>")
+
+        # === DETAILED OVERVIEW ===
+        text_content = str(state.get("text", "") or "")
+        word_count = len(re.findall(r"\b\w+\b", text_content)) if text_content else 0
+        requested_count = len(requested_check_ids)
+        executed_count = len(executed_ids)
+        skipped_count = len(skipped_items)
+        inline_deferred = len(state.get("_deferred_inlines", []) or [])
+
+        overview = (
+            f"This review evaluated {word_count} words using {executed_count} executed check(s)"
+            f" out of {requested_count or executed_count} requested check(s). "
+            f"It identified {total_issues} issue(s): {errors} error-level, {warnings} warning-level, and {infos} informational. "
+            f"Deferred inline findings queued: {inline_deferred}."
+        )
+        if skipped_count > 0:
+            overview += f" Skipped checks: {skipped_count}."
+        sections.append("<p><strong>Detailed Overview:</strong></p>")
+        sections.append(f"<p>{html.escape(overview)}</p>")
+
+        # === MAIN FINDINGS ===
+        if total_issues == 0:
+            sections.append("<p><strong>Result:</strong> No issues detected. Excellent work!</p>")
+        else:
+            if errors > 5:
+                severity = "High"
+            elif errors > 0 or warnings > 5:
+                severity = "Moderate"
             else:
-                level = "Very difficult"
-            sections.append(
-                f"<p>Readability: Flesch score {fre} ({level}), "
-                f"grade level {fkgl}</p>"
-            )
+                severity = "Low"
+            sections.append(f"<p><strong>Issues Found:</strong> {total_issues} total ({severity} severity)</p>")
 
+        # === SEVERITY BREAKDOWN TABLE ===
+        sections.append("<p><strong>Severity Breakdown:</strong></p>")
+        severity_html = "<table><tr><th>Level</th><th>Count</th><th>Share</th></tr>"
+        if total_issues > 0:
+            severity_html += f"<tr><td>Errors</td><td>{errors}</td><td>{(errors / total_issues) * 100:.1f}%</td></tr>"
+            severity_html += f"<tr><td>Warnings</td><td>{warnings}</td><td>{(warnings / total_issues) * 100:.1f}%</td></tr>"
+            severity_html += f"<tr><td>Informational</td><td>{infos}</td><td>{(infos / total_issues) * 100:.1f}%</td></tr>"
+        else:
+            severity_html += "<tr><td>Errors</td><td>0</td><td>0.0%</td></tr>"
+            severity_html += "<tr><td>Warnings</td><td>0</td><td>0.0%</td></tr>"
+            severity_html += "<tr><td>Informational</td><td>0</td><td>0.0%</td></tr>"
+        severity_html += "</table>"
+        sections.append(severity_html)
+
+        # === ISSUE CATEGORIES TABLE ===
         if issue_types:
-            sections.append("<p>Issues by type:</p>")
-            items = []
-            
-            # Sort: errors first, then warnings, then info
-            sev_order = {"error": 0, "warning": 1, "info": 2}
-            type_sev = {}
-            for issue in state["issues"]:
-                t = issue.get("type", "unknown")
-                s = issue.get("severity", "info")
-                if t not in type_sev or sev_order.get(s, 3) < sev_order.get(type_sev[t], 3):
-                    type_sev[t] = s
-            for issue_type in sorted(issue_types.keys(), key=lambda t: (sev_order.get(type_sev.get(t, "info"), 3), t)):
-                count = issue_types[issue_type]
-                display_name = type_names.get(issue_type, issue_type)
-                sev_label = type_sev.get(issue_type, "info").upper()
-                items.append(f"<li>[{sev_label}] {display_name}: {count}</li>")
-            if items:
-                sections.append(f"<ul>{''.join(items)}</ul>")
+            sections.append("<p><strong>Issue Categories:</strong></p>")
+            category_html = "<table><tr><th>Category</th><th>Count</th><th>What It Checks</th></tr>"
+            for issue_type, count in sorted(issue_types.items(), key=lambda x: x[1], reverse=True):
+                safe_issue_type = str(issue_type or "unknown")
+                type_label = str(type_names.get(safe_issue_type, safe_issue_type.replace("_", " ").title()) or safe_issue_type)
+                type_note = str(type_descriptions.get(safe_issue_type, "General writing or structure quality concern.") or "General writing or structure quality concern.")
+                category_html += (
+                    "<tr>"
+                    f"<td>{html.escape(type_label)}</td>"
+                    f"<td>{count}</td>"
+                    f"<td>{html.escape(type_note)}</td>"
+                    "</tr>"
+                )
+            category_html += "</table>"
+            sections.append(category_html)
 
-        # Top priorities (errors first)
-        if errors > 0:
-            error_issues = [i for i in state["issues"] if i.get("severity") == "error"]
-            seen = set()
-            top = []
-            for issue in error_issues:
-                key = issue["type"]
-                if key not in seen:
-                    seen.add(key)
-                    top.append(type_names.get(key, key))
-                if len(top) >= 3:
-                    break
-            sections.append(f"<p>Top priorities: {', '.join(top)}</p>")
+        # === READABILITY METRICS (EXPLAINED) ===
+        page_text = state.get("text", "")
+        if page_text:
+            try:
+                flesch_ease = self._calculate_flesch_reading_ease(page_text)
+                flesch_grade = self._calculate_flesch_kincaid_grade(page_text)
 
+                def ease_interpretation(score: float) -> Tuple[str, str]:
+                    if score >= 90:
+                        return "Very Easy", "Understood by most 11-year-old readers."
+                    if score >= 80:
+                        return "Easy", "Conversational and straightforward for broad audiences."
+                    if score >= 70:
+                        return "Fairly Easy", "Comfortable for general readers with minimal effort."
+                    if score >= 60:
+                        return "Standard", "Suitable for typical business and web content."
+                    if score >= 50:
+                        return "Fairly Difficult", "May feel dense; simplification can improve scanability."
+                    if score >= 30:
+                        return "Difficult", "Likely requires careful reading and domain familiarity."
+                    return "Very Difficult", "Academic or technical density; consider simplification."
+
+                def grade_interpretation(score: float) -> Tuple[str, str]:
+                    if score <= 6:
+                        return "Elementary", "Accessible to a broad audience."
+                    if score <= 8:
+                        return "Middle School", "Generally clear for non-specialist readers."
+                    if score <= 10:
+                        return "High School", "Appropriate for most professional internal documentation."
+                    if score <= 13:
+                        return "College", "Better for expert audiences; may be dense for general readers."
+                    return "Graduate", "Highly complex language; simplify where possible."
+
+                ease_label, ease_note = ease_interpretation(flesch_ease)
+                grade_label, grade_note = grade_interpretation(flesch_grade)
+
+                sections.append("<p><strong>Readability Metrics (Explained):</strong></p>")
+                readability_html = "<table><tr><th>Metric</th><th>Score</th><th>Interpretation</th><th>What This Means</th></tr>"
+                readability_html += (
+                    "<tr>"
+                    f"<td>Flesch Reading Ease</td><td>{flesch_ease:.1f}</td>"
+                    f"<td>{html.escape(ease_label)}</td><td>{html.escape(ease_note)}</td>"
+                    "</tr>"
+                )
+                readability_html += (
+                    "<tr>"
+                    f"<td>Flesch-Kincaid Grade Level</td><td>{flesch_grade:.1f}</td>"
+                    f"<td>{html.escape(grade_label)}</td><td>{html.escape(grade_note)}</td>"
+                    "</tr>"
+                )
+                readability_html += "</table>"
+                sections.append(readability_html)
+
+                readability_guidance = (
+                    "Flesch Reading Ease is better when higher; Flesch-Kincaid Grade Level is better when lower. "
+                    "If ease is below 60 or grade is above 10, prioritize shorter sentences, simpler vocabulary, "
+                    "and smaller paragraphs."
+                )
+                sections.append(f"<p><em>{html.escape(readability_guidance)}</em></p>")
+            except Exception:
+                logger.warning("[REVIEW] Could not calculate readability metrics")
+
+        # === QUALITY ASSESSMENT ===
+        sections.append("<p><strong>Overall Quality Assessment:</strong></p>")
+        if total_issues == 0:
+            assessment = "Excellent - This page is well-written, well-structured, and requires no changes."
+        elif errors == 0 and total_issues <= 3:
+            assessment = "Good - Minor issues present. The content is generally well-written with only small improvements needed."
+        elif errors <= 2 and total_issues <= 10:
+            assessment = "Moderate - Several issues found. Content is clear but would benefit from improvements in clarity, consistency, and technical accuracy."
+        else:
+            assessment = "Needs Improvement - Significant issues affecting clarity, accuracy, and professionalism. Prioritize error-level items for immediate attention."
+        sections.append(f"<p>{html.escape(assessment)}</p>")
+
+        # === RECOMMENDATIONS ===
         summary_parts = []
-        if state["footer_notes"]:
+        if state.get("footer_notes"):
             summary_parts.extend(state["footer_notes"])
+
         if issue_types.get("long_sentence", 0) > 0:
-            summary_parts.append("split long sentences for better readability")
+            summary_parts.append(f"Break {issue_types.get('long_sentence')} long sentence(s) into shorter, clearer statements")
         if issue_types.get("long_paragraph", 0) > 0:
-            summary_parts.append("break long paragraphs into shorter blocks")
+            summary_parts.append(f"Split {issue_types.get('long_paragraph')} long paragraph(s) for improved readability")
         if issue_types.get("repeated_word", 0) > 0:
-            summary_parts.append("remove repeated words")
+            summary_parts.append(f"Remove {issue_types.get('repeated_word')} instance(s) of repeated consecutive words")
         if issue_types.get("grammar", 0) > 0 or issue_types.get("misspelling", 0) > 0:
-            summary_parts.append("review and correct grammar/spelling issues")
+            summary_parts.append("Review and correct grammar, spelling, and punctuation errors")
         if issue_types.get("context_noise", 0) > 0:
-            summary_parts.append("verify suspicious or potentially malformed words")
+            summary_parts.append("Verify or remove suspicious/malformed words and text")
         if issue_types.get("statistics_validation", 0) > 0:
-            summary_parts.append("verify and correct data/statistical values for internal consistency")
+            summary_parts.append("Validate all numerical data, statistics, and calculations")
         if issue_types.get("citation", 0) > 0:
-            summary_parts.append("fix or complete citation references")
+            summary_parts.append("Add or complete missing citation references and source links")
         if issue_types.get("duplicate_content", 0) > 0:
-            summary_parts.append("merge or remove duplicate paragraphs")
+            summary_parts.append("Eliminate or consolidate duplicate content and paragraphs")
         if issue_types.get("table_validation", 0) > 0:
-            summary_parts.append("verify table data accuracy (totals, percentages, empty cells)")
+            summary_parts.append("Review and correct table data, totals, and formatting")
+        if issue_types.get("empty_section", 0) > 0:
+            summary_parts.append("Fill or remove empty sections with no content")
+        if issue_types.get("profanity", 0) > 0:
+            summary_parts.append("Remove unprofessional language and off-topic content")
+        if issue_types.get("topic_coherence", 0) > 0:
+            summary_parts.append("Ensure all content is semantically relevant to the document topic")
 
         if summary_parts:
-            sections.append("<p>Recommendations:</p>")
-            items = ''.join(f"<li>{part}</li>" for part in summary_parts)
-            sections.append(f"<ul>{items}</ul>")
-
-        if total_issues == 0:
-            sections.append("<p>Overall: This page is well-written and structured. No changes needed.</p>")
-        elif errors == 0 and total_issues <= 5:
-            sections.append("<p>Overall: Overall quality is good. Minor improvements suggested above will enhance clarity and correctness.</p>")
-        elif errors <= 3 and total_issues <= 15:
-            sections.append("<p>Overall: Several issues found. Review and apply suggestions above to improve content quality and readability.</p>")
-        else:
-            sections.append("<p>Overall: Significant issues found. Please prioritize the error-level items above to substantially improve page quality.</p>")
+            sections.append("<p><strong>Top Recommendations (Priority Order):</strong></p>")
+            priority_items = summary_parts[:7]
+            items_html = "".join(f"<li>{html.escape(part)}</li>" for part in priority_items)
+            sections.append(f"<ol>{items_html}</ol>")
 
         fallback_comments = state.get("footer_fallback_comments", [])
         if fallback_comments:
-            sections.append("<p>Notes (inline placement fallback):</p>")
-            items = ''.join(f"<li>{comment}</li>" for comment in fallback_comments[:20])
-            sections.append(f"<ul>{items}</ul>")
+            sections.append("<p><strong>Additional Inline Placement Notes:</strong></p>")
+            items_html = "".join(f"<li>{html.escape(comment)}</li>" for comment in fallback_comments[:10])
+            sections.append(f"<ul>{items_html}</ul>")
 
-        return ''.join(sections)
+        return "".join(sections)
 
-    def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Run the full page review workflow using the configured checklist source."""
+        logger.info("[REVIEW] === Starting review for page_id=%s checklist_page_id=%s ===", page_id, checklist_page_id or "(default)")
         if not page_id:
+            logger.error("[REVIEW] page_id is required")
             return None, "page_id is required"
 
         storage, error = self.api.get_page_storage(page_id)
         if error:
+            logger.error("[REVIEW] Failed to fetch page storage: %s", error)
             return None, error
+        logger.info("[REVIEW] Fetched page storage (%d chars)", len(storage))
 
         text = self.syntax._extract_plain_text_from_storage(storage)
         if not text:
+            logger.error("[REVIEW] Page content is empty after extraction")
             return None, "Page content is empty"
+        logger.info("[REVIEW] Extracted plain text (%d chars)", len(text))
 
         state = {
             "issues": [],
+            "text": text,  # Page content for readability metrics
             "comments_posted": 0,
             "footer_fallback_comments_posted": 0,
             "footer_notes": [],
@@ -1283,12 +1551,16 @@ class ReviewActions:
             "language_issues_found": 0,
             "executed_checks": [],
             "skipped_checks": [],
+            "requested_check_ids": [],
             "_cached_page_text": text,
+            "_defer_inline": True,
+            "_deferred_inlines": [],
         }
 
         title = self.api._get_document_title(page_id) or "Untitled"
         doc_type = self._classify_document_type(title, text)
         type_specific_checks = self._get_type_specific_checks(doc_type)
+        logger.info("[REVIEW] Page title=%r, doc_type=%s, applicable_checks=%s", title, doc_type, type_specific_checks)
 
         check_handlers = {
             "grammar": lambda: self._run_grammar_check(page_id, text, state),
@@ -1306,8 +1578,14 @@ class ReviewActions:
         }
 
         _checklist_page = checklist_page_id or getattr(config, "REVIEW_CHECKLIST_PAGE_ID", "")
+        custom_checklist_requested = isinstance(_checklist_page, str) and _checklist_page.strip().upper().startswith("__CUSTOM_CHECKS__:")
         checklist = self._fetch_review_checklist(_checklist_page)
-        if not any(str(item.get("id", "")).strip() == "statistics_validation" for item in checklist):
+        state["requested_check_ids"] = [
+            str(item.get("id", "")).strip()
+            for item in sorted(checklist, key=lambda item: int(item.get("execution_order", 999)))
+            if str(item.get("id", "")).strip()
+        ]
+        if (not custom_checklist_requested) and not any(str(item.get("id", "")).strip() == "statistics_validation" for item in checklist):
             checklist.append({"id": "statistics_validation", "execution_order": 7, "enabled": True, "required_env": ""})
         ordered_checks = sorted(checklist, key=lambda item: int(item.get("execution_order", 999)))
 
@@ -1317,41 +1595,128 @@ class ReviewActions:
                 continue
 
             if not check.get("enabled", True):
+                logger.info("[REVIEW] Skipping check %r (disabled)", check_id)
                 state["skipped_checks"].append({"id": check_id, "reason": "disabled"})
                 continue
 
-            if check_id not in type_specific_checks:
+            if (not custom_checklist_requested) and check_id not in type_specific_checks:
+                logger.info("[REVIEW] Skipping check %r (not relevant for %s)", check_id, doc_type)
                 state["skipped_checks"].append({"id": check_id, "reason": f"not relevant for {doc_type}"})
                 continue
 
             required_env = str(check.get("required_env", "")).strip()
             if required_env and not self._is_env_enabled(required_env):
+                logger.info("[REVIEW] Skipping check %r (env %s not enabled)", check_id, required_env)
                 state["skipped_checks"].append({"id": check_id, "reason": f"env {required_env} is not enabled"})
                 continue
 
             handler = check_handlers.get(check_id)
             if handler is None:
+                logger.warning("[REVIEW] Skipping check %r (no handler registered)", check_id)
                 state["skipped_checks"].append({"id": check_id, "reason": "no handler registered"})
                 continue
 
+            logger.info("[REVIEW] >>> Running check: %s", check_id)
+            check_start = time.time()
             handler()
+            check_elapsed = time.time() - check_start
             state["executed_checks"].append(check_id)
+            logger.info("[REVIEW] <<< Finished check: %s (%.1fs, issues so far: %d, inline posted: %d)", check_id, check_elapsed, len(state["issues"]), state["comments_posted"])
+
+        # --- Phase 2: Post footer FIRST (single API call, before rate limits hit) ---
+        logger.info("[REVIEW] Building footer summary (%d issues found, %d deferred inline comments)", len(state["issues"]), len(state["_deferred_inlines"]))
+        footer_comment = self._build_footer_review_comment(state)
+        state["footer_summary"] = footer_comment  # Store for response
+        footer_response, footer_error = None, None
+        if skip_footer:
+            logger.info("[REVIEW] Skipping footer post (skip_footer=True)")
+            footer_posted = False
+        else:
+            for attempt in range(3):
+                delay = 2 * (attempt + 1)
+                logger.info("[REVIEW] Footer post attempt %d/3 (delay=%ds)", attempt + 1, delay)
+                time.sleep(delay)
+                footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
+                if footer_response is not None and not footer_error:
+                    logger.info("[REVIEW] Footer posted successfully on attempt %d", attempt + 1)
+                    break
+                logger.warning("[REVIEW] Footer post failed on attempt %d after v2/v1 fallback: %s", attempt + 1, footer_error)
+            footer_posted = footer_response is not None and not footer_error
+
+        # --- Phase 3: Now post deferred inline comments ---
+        state["_defer_inline"] = False
+        deferred = state.pop("_deferred_inlines", [])
+        if skip_inline:
+            logger.info("[REVIEW] Skipping %d deferred inline comments (skip_inline=True)", len(deferred))
+        else:
+            logger.info("[REVIEW] Posting %d deferred inline comments", len(deferred))
+            # Pre-fetch page text once so threads share the cached value
+            if deferred:
+                sample_page_id = deferred[0]["page_id"]
+                if state.get("_cached_page_text") is None:
+                    page_text, _ = self.syntax._get_page_plain_text(sample_page_id)
+                    if page_text:
+                        state["_cached_page_text"] = page_text
+            _state_lock = threading.Lock()
+
+            def _post_one(item):
+                page_text_local = state.get("_cached_page_text")
+                seen: set = set()
+                last_error = [None]
+
+                def _try_anchor(option):
+                    if not option or option in seen:
+                        return False
+                    seen.add(option)
+                    result, error = self.api.post_inline_comment(
+                        page_id=item["page_id"],
+                        comment=item["comment"],
+                        text_selection=option,
+                        original_position=item.get("original_position"),
+                        page_text=page_text_local,
+                    )
+                    if result is not None and not error:
+                        with _state_lock:
+                            state["comments_posted"] += 1
+                        return True
+                    if error:
+                        last_error[0] = error
+                    return False
+
+                for anchor in item["anchors"]:
+                    exact = self.syntax._normalize_inline_text(anchor)
+                    if _try_anchor(exact):
+                        return
+                for anchor in item["anchors"]:
+                    for option in self.syntax._build_inline_candidates(anchor):
+                        if _try_anchor(option):
+                            return
+                with _state_lock:
+                    state["inline_failures"].append({
+                        "comment": item["comment"],
+                        "error": last_error[0],
+                        "anchors": item["anchors"],
+                    })
+
+            MAX_WORKERS = 5
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = [executor.submit(_post_one, item) for item in deferred]
+                done_count = 0
+                for fut in concurrent.futures.as_completed(futures):
+                    fut.result()  # surface exceptions
+                    done_count += 1
+                    if done_count % 10 == 0:
+                        logger.info("[REVIEW] Posted %d inline comment(s) so far...", state["comments_posted"])
+            logger.info("[REVIEW] Posted %d inline comment(s)", state["comments_posted"])
 
         if state["inline_failures"]:
             state["footer_notes"].append(f"{len(state['inline_failures'])} issue(s) could not be attached inline")
 
-        footer_comment = self._build_footer_review_comment(state)
-        # Retry footer post up to 3 times with increasing delay to handle rate limits
-        footer_response, footer_error = None, None
-        for attempt in range(3):
-            time.sleep(1 + attempt)
-            footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
-            if footer_response is not None and not footer_error:
-                break
-        if footer_response is not None and not footer_error and state["footer_fallback_comments"]:
+        if footer_posted and state["footer_fallback_comments"]:
             state["footer_fallback_comments_posted"] = 1
-        footer_posted = footer_response is not None and not footer_error
 
+        logger.info("[REVIEW] === Review complete for page %s: %d issues, %d inline posted, %d inline failed, footer=%s ===",
+                     page_id, len(state["issues"]), state["comments_posted"], len(state["inline_failures"]), "posted" if footer_posted else "FAILED")
         severity_counts = Counter(i.get("severity", "info") for i in state["issues"])
         return {
             "page_id": page_id,
@@ -1368,10 +1733,12 @@ class ReviewActions:
             "inline_failures_count": len(state["inline_failures"]),
             "inline_failures": state["inline_failures"][:20],
             "footer_posted": footer_posted,
+            "custom_checklist_requested": custom_checklist_requested,
             "executed_checks": state["executed_checks"],
             "skipped_checks": state["skipped_checks"],
             "review_checklist": checklist,
             "issues": state["issues"],
             "document_type": doc_type,
             "type_specific_checks_applied": type_specific_checks,
+            "footer_summary": state.get("footer_summary", ""),  # Always include summary
         }, None

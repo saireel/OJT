@@ -3,154 +3,578 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Copilot Bridge</title>
+    <title>MunnAI</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
-    <div class="header">
-        <h1>munnAI</h1><br>
-        <span class="subtitle">AI-Powered Confluence & GitHub Pull Request Review Assistant</span>
-    </div>
-    <div class="chat-area" id="chat-scroll">
-        <div class="chat-inner" id="chat"></div>
-    </div>
-    <div class="input-bar">
-        <div class="input-wrap">
-            <textarea id="input" placeholder="Paste a link or type a prompt... (Ctrl+Enter to send)" rows="1"></textarea>
-            <button class="send-btn" id="send">Send</button>
+    <div class="sidebar">
+        <div class="sidebar-brand">
+            <h1>MunnAI</h1>
+            <div class="subtitle">AI-Powered Confluence &amp; GitHub Review Assistant</div>
+        </div>
+        <div class="sidebar-section">
+            <h3>Quick Access</h3>
+            <button class="sidebar-btn" id="quick-review-btn">
+                <svg class="sidebar-btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                Quick Review
+            <button class="sidebar-btn" id="pr-review-btn" style="display:none;">GitHub PR Review</button>
+            </button>
+        </div>
+        <div class="sidebar-section">
+            <h3>Capabilities</h3>
+            <div class="sidebar-item"><span class="dot"></span> Confluence Page Review</div>
+            <div class="sidebar-item"><span class="dot"></span> GitHub PR Review</div>
+            <div class="sidebar-item"><span class="dot"></span> Inline &amp; Footer Comments</div>
+            <div class="sidebar-item"><span class="dot"></span> Page Summarization</div>
+            <div class="sidebar-item"><span class="dot"></span> Content Updates</div>
+        </div>
+        <div class="sidebar-section">
+            <h3>Quick Tips</h3>
+            <div class="sidebar-item sidebar-note">
+                <span>Paste a Confluence or GitHub link to get started</span>
+                <span>Use Ctrl+Enter to send</span>
+            </div>
+        </div>
+        <div class="sidebar-footer">
+    <div class="sidebar-footer-links">
+        <button class="sidebar-footer-btn" id="auth-settings-btn">
+            <!-- icon SVG --> Account Setup
+        </button>
+        <button class="sidebar-footer-btn" id="help-guide-sidebar-btn">
+            <!-- icon SVG --> Quick User Guide
+        </button>
+        </div>
+        <div class="sidebar-footer-version">
+            MunnAI v1.1
         </div>
     </div>
-<script>
-const chat = document.getElementById("chat");
-const chatScroll = document.getElementById("chat-scroll");
-const input = document.getElementById("input");
-const sendBtn = document.getElementById("send");
+    </div>
 
-function esc(text) {
-    const d = document.createElement("div");
-    d.textContent = text;
-    return d.innerHTML;
-}
-function addMsg(role, text, badges, isStatus) {
-    const div = document.createElement("div");
-    div.className = "msg " + role;
-    let badgeHtml = "";
-    if (badges && badges.length) {
-        badgeHtml = '<div style="margin-bottom:6px">' +
-            badges.map(b => `<span class="detected-badge">${esc(b)}</span>`).join("") +
-            "</div>";
-    }
-    // Add time
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
-        <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
-        ${badgeHtml}
-        <div${isStatus ? ' style="display:flex;align-items:center;font-size:16px;"' : ''}>${esc(text)}</div>
-    </div>`;
-    chat.appendChild(div);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
-    return div;
-}
 
-function addLoading() {
-    const div = document.createElement("div");
-    div.className = "msg bot";
-    div.id = "loader";
-    div.innerHTML = `<div class="msg-inner loading">Thinking</div>`;
-    chat.appendChild(div);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
-    return div;
-}
-async function send() {
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = "";
-    input.style.height = "44px";
-    addMsg("user", text);
-    sendBtn.disabled = true;
-    const loader = addLoading();
+    <div class="help-modal" id="quick-review-modal">
+        <div class="help-modal-content auth-settings-content quick-review-modal-content">
+            <div class="help-modal-header">
+                <div>
+                    <h2>Quick Review</h2>
+                    <p class="quick-review-subtitle">Choose the review mode, then open the matching panel.</p>
+                </div>
+                <button class="help-modal-close" id="quick-review-close">&times;</button>
+            </div>
+            <div class="help-modal-body">
+                <div class="review-mode-grid">
+                    <label class="review-mode-card" for="quick-review-combined">
+                        <input type="radio" name="quick-review-mode" id="quick-review-combined" value="combined" checked>
+                        <span class="review-mode-card-title">Review Confluence Page with a Pull Request</span>
+                        <span class="review-mode-card-copy">Use both the page context and the PR checklist.</span>
+                    </label>
+                    <label class="review-mode-card" for="quick-review-confluence">
+                        <input type="radio" name="quick-review-mode" id="quick-review-confluence" value="confluence">
+                        <span class="review-mode-card-title">Confluence page review</span>
+                        <span class="review-mode-card-copy">Focus on page quality, structure, and inline comments.</span>
+                    </label>
+                    <label class="review-mode-card" for="quick-review-pr">
+                        <input type="radio" name="quick-review-mode" id="quick-review-pr" value="pr">
+                        <span class="review-mode-card-title">GitHub PR review</span>
+                        <span class="review-mode-card-copy">Use the PR checklist and review comments only.</span>
+                    </label>
+                </div>
+            </div>
+            <div class="panel-actions">
+                <button class="btn-primary" id="quick-review-continue-btn">Continue</button>
+                <button class="btn-secondary" id="quick-review-cancel-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
 
-    try {
-        const res = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: text }),
-        });
-        const data = await res.json();
-        loader.remove();
+    <!-- PR Review Panel (modal overlay) -->
+    <div class="pr-review-panel" id="pr-review-panel">
+        <div class="panel-modal">
+            <div class="panel-header review-panel-header">
+                <div class="panel-header-title-group">
+                    <h2 id="pr-review-title">GitHub PR Review</h2>
+                    <button type="button" class="btn-secondary btn-small" id="pr-change-mode-btn">Change mode</button>
+                </div>
+                <button class="close-btn" id="pr-review-close">&times;</button>
+            </div>
+            <div class="panel-content">
+                <!-- PR Link Input -->
+                <div class="form-group">
+                    <label>GitHub PR Link</label>
+                    <div class="input-group">
+                        <input type="text" id="pr-link-input" placeholder="https://github.com/owner/repo/pull/123" class="pr-link-input">
+                        <button class="parse-btn" id="parse-pr-btn">Parse</button>
+                    </div>
+                    <div class="pr-info" id="pr-info" style="display:none;">
+                        PR: <span id="pr-display">-</span>
+                    </div>
+                </div>
 
-        // Show detected links (informational only)
+                <!-- Review Checklist -->
+                <div class="form-group">
+                    <label>Review Checklist</label>
+                    <p class="form-hint">Check the items you want reviewed.</p>
+                    <div class="checklist-controls">
+                        <button class="add-item-btn select-all-btn" id="select-all-btn">Select All</button>
+                        <button class="add-item-btn deselect-all-btn" id="deselect-all-btn">Deselect All</button>
+                    </div>
+                    <div class="checklist-items" id="checklist-items">
+                        <!-- Naming -->
+                        <div class="check-item" data-category="naming">
+                            <input type="checkbox" checked>
+                            <span>PascalCase Class Names</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="naming">
+                            <input type="checkbox" checked>
+                            <span>camelCase Function Names (JS/TS)</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="naming">
+                            <input type="checkbox" checked>
+                            <span>snake_case Function Names (Python)</span>
+                            
+                        </div>
+                        <!-- Documentation -->
+                        <div class="check-item" data-category="docs">
+                            <input type="checkbox" checked>
+                            <span>Required Comments/Docstrings</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="docs">
+                            <input type="checkbox" checked>
+                            <span>Comment Accuracy</span>
+                            
+                        </div>
+                        <!-- Code Quality -->
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox">
+                            <span>Code Duplication / DRY Violations</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox">
+                            <span>Unused Variables / Imports</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox">
+                            <span>Complex / Long Functions</span>
+                            
+                        </div>
+                        <!-- Security -->
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox">
+                            <span>Hardcoded Secrets / Credentials</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox">
+                            <span>SQL Injection / XSS Risks</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox">
+                            <span>Input Validation</span>
+                            
+                        </div>
+                        <!-- Error Handling -->
+                        <div class="check-item" data-category="errors">
+                            <input type="checkbox">
+                            <span>Proper Error Handling</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="errors">
+                            <input type="checkbox">
+                            <span>Edge Cases Covered</span>
+                            
+                        </div>
+                        <!-- Style / Linting -->
+                        <div class="check-item" data-category="style">
+                            <input type="checkbox">
+                            <span>Flake8 / ESLint Compliance</span>
+                            
+                        </div>
+                        <div class="check-item" data-category="style">
+                            <input type="checkbox">
+                            <span>Consistent Formatting / Indentation</span>
+                            
+                        </div>
+                        <!-- Testing -->
+                        <div class="check-item" data-category="testing">
+                            <input type="checkbox">
+                            <span>Test Coverage for New Code</span>
+                            
+                        </div>
+                        <!-- Performance -->
+                        <div class="check-item" data-category="perf">
+                            <input type="checkbox">
+                            <span>Performance / Efficiency Concerns</span>
+                            
+                        </div>
+                        <!-- Cross-file -->
+                        <div class="check-item" data-category="consistency">
+                            <input type="checkbox">
+                            <span>Cross-file Consistency</span>
+                            
+                        </div>
+                    </div>
+                </div>
 
-        // Show error or response
-        if (data.error) {
-            if (data.detected && data.detected.length) {
-                addMsg("bot", "❌ " + data.error, null, true);
-            } else {
-                addMsg("bot", "❌ " + data.error);
-            }
-        } else if (data.response) {
-            const isRefusal = /can't assist|cannot assist|unable to help|i'm sorry|i am sorry/i.test(data.response);
-            addMsg("bot", data.response, data.detected);
-            if (data.detected && data.detected.length && !isRefusal) {
-                addMsg("bot", "✅ Task completed successfully", null, true);
-            }
-        } else {
-            addMsg("bot", "No response");
-        }
-    } catch (e) {
-        loader.remove();
-        addMsg("bot", "❌ Error: " + e.message, null, true);
-    }
-    sendBtn.disabled = false;
-    input.focus();
-}
+                <!-- Expected Output -->
+                <div class="form-group">
+                    <label>Expected Output</label>
+                    <p class="form-hint">Select what the review should produce:</p>
+                    <div class="output-options" id="output-options">
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="out-summary" checked>
+                            <span>Review Summary on the general comment</span>
+                            
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="out-file-level" checked>
+                            <span>Specific comments at file level</span>
+                            
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="out-inline" checked>
+                            <span>Direct inline comments on specific lines</span>
+                            
+                        </div>
+                    </div>
+                    <div class="add-item-row">
+                        <input type="text" id="add-output-input" placeholder="Add custom expected output..." class="add-item-input">
+                        <button type="button" id="add-output-btn" class="add-item-btn">+ Add</button>
+                    </div>
+                </div>
 
-sendBtn.addEventListener("click", send);
-input.addEventListener("keydown", e => {
-    if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); send(); }
-});
-input.addEventListener("input", () => {
-    input.style.height = "44px";
-    input.style.height = Math.min(input.scrollHeight, 150) + "px";
-});
+                <div class="form-group review-tuning">
+                    <label>Review Speed And Inline Noise Controls</label>
+                    <label class="check-item tuning-item">
+                        <input type="checkbox" id="fast-mode-toggle">
+                        <span>Fast mode (caps inline comments and prefers grouped findings)</span>
+                    </label>
+                    <div class="tuning-grid">
+                        <label class="tuning-field" for="max-inline-comments">Max inline comments per run
+                            <input type="number" id="max-inline-comments" min="1" max="25" value="6">
+                        </label>
+                        <label class="check-item tuning-item">
+                            <input type="checkbox" id="group-similar-inline" checked>
+                            <span>Group similar inline issues</span>
+                        </label>
+                    </div>
+                    <p class="form-hint">Fast mode auto-lowers max inline comments to 4 and forces grouped inline findings.</p>
+                </div>
 
-function typeMsg(role, text, badges, isStatus, delay=30) {
-    const div = document.createElement("div");
-    div.className = "msg " + role;
-    let badgeHtml = "";
-    if (badges && badges.length) {
-        badgeHtml = '<div style="margin-bottom:6px">' +
-            badges.map(b => `<span class="detected-badge">${esc(b)}</span>`).join("") +
-            "</div>";
-    }
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    div.innerHTML = `<div class="msg-inner" style="display:flex;flex-direction:column;gap:4px;justify-content:flex-start;">
-        <div style="font-size:11px;color:#888;align-self:flex-start;">${timeStr}</div>
-        ${badgeHtml}
-        <div id="typewriter"></div>
-    </div>`;
-    chat.appendChild(div);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
+                <div class="panel-actions">
+                    <button class="btn-primary" id="start-review-btn">Start Review</button>
+                    <button class="btn-secondary" id="back-to-chat-btn">Back to Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
-    // Typewriter effect
-    const target = div.querySelector("#typewriter");
-    let i = 0;
-    function type() {
-        if (i <= text.length) {
-            target.innerHTML = esc(text.slice(0, i));
-            chatScroll.scrollTop = chatScroll.scrollHeight;
-            i++;
-            setTimeout(type, delay);
-        }
-    }
-    type();
-    return div;
-}
+    <!-- Confluence Review Panel (modal overlay) -->
+    <div class="pr-review-panel" id="confluence-review-panel">
+        <div class="panel-modal">
+            <div class="panel-header review-panel-header">
+                <div class="panel-header-title-group">
+                    <h2 id="confluence-review-title">Review Confluence Page with a Pull Request</h2>
+                    <button type="button" class="btn-secondary btn-small" id="confluence-change-mode-btn">Change mode</button>
+                </div>
+                <button class="close-btn" id="confluence-review-close">&times;</button>
+            </div>
+            <div class="panel-content">
+                <!-- Confluence Page Input -->
+                <div class="form-group">
+                    <label>Confluence Page URL or ID</label>
+                    <div class="input-group">
+                        <input type="text" id="confluence-link-input" placeholder="https://yoursite.atlassian.net/wiki/spaces/.../pages/12345 or page ID" class="pr-link-input">
+                        <button class="parse-btn" id="parse-confluence-btn">Parse</button>
+                    </div>
+                    <div class="pr-info" id="confluence-info" style="display:none;">
+                        Page: <span id="confluence-display">-</span>
+                    </div>
+                </div>
+                <div class="form-group" id="confluence-pr-link-group">
+                    <label>GitHub PR URL or ID</label>
+                    <div class="input-group">
+                        <input type="text" id="confluence-pr-link-input" placeholder="https://github.com/owner/repo/pull/123 or owner/repo#123" class="pr-link-input">
+                    </div>
+                    <p class="form-hint">Add the PR that should be reviewed against the documentation.</p>
+                </div>
 
-typeMsg("bot", "Hi! I am munnAI, how may I help you today?");
 
-</script>
+                <!-- Document Type -->
+                <div class="form-group">
+                    <label>Document Type</label>
+                    <p class="form-hint">Select the type of document for context-aware review, or leave as None.</p>
+                    <select id="confluence-doc-type" class="doc-type-select">
+                        <option value="">None (general review)</option>
+                        <option value="technical">Technical Documentation</option>
+                        <option value="requirements">Requirements / Spec</option>
+                        <option value="runbook">Runbook / How-To Guide</option>
+                        <option value="meeting-notes">Meeting Notes</option>
+                        <option value="design">Design Document</option>
+                        <option value="release-notes">Release Notes</option>
+                        <option value="api-docs">API Documentation</option>
+                        <option value="policy">Policy / Process Document</option>
+                        <option value="onboarding">Onboarding Guide</option>
+                    </select>
+                </div>
+
+                <!-- Review Checklist -->
+                <div class="form-group">
+                    <label>Review Checklist</label>
+                    <p class="form-hint">Check the items you want reviewed.</p>
+                    <div class="checklist-controls">
+                        <button class="add-item-btn select-all-btn" id="confluence-select-all-btn">Select All</button>
+                        <button class="add-item-btn deselect-all-btn" id="confluence-deselect-all-btn">Deselect All</button>
+                    </div>
+                    <div class="checklist-items" id="confluence-checklist-items">
+                        <!-- Spelling & Grammar -->
+                        <div class="check-item" data-category="spelling">
+                            <input type="checkbox" checked>
+                            <span>Spelling & Grammar</span>
+                        </div>
+                        <div class="check-item" data-category="spelling">
+                            <input type="checkbox" checked>
+                            <span>Repeated Words</span>
+                        </div>
+                        <!-- Readability -->
+                        <div class="check-item" data-category="readability">
+                            <input type="checkbox" checked>
+                            <span>Long Sentences (readability)</span>
+                        </div>
+                        <div class="check-item" data-category="readability">
+                            <input type="checkbox" checked>
+                            <span>Long Paragraphs</span>
+                        </div>
+                        <!-- Structure -->
+                        <div class="check-item" data-category="structure">
+                            <input type="checkbox" checked>
+                            <span>Page Structure & Headings</span>
+                        </div>
+                        <div class="check-item" data-category="structure">
+                            <input type="checkbox">
+                            <span>Table of Contents Present</span>
+                        </div>
+                        <!-- Content Quality -->
+                        <div class="check-item" data-category="content">
+                            <input type="checkbox">
+                            <span>Broken / Missing Links</span>
+                        </div>
+                        <div class="check-item" data-category="content">
+                            <input type="checkbox">
+                            <span>Outdated Information</span>
+                        </div>
+                        <div class="check-item" data-category="content">
+                            <input type="checkbox">
+                            <span>Consistent Terminology</span>
+                        </div>
+                        <!-- Formatting -->
+                        <div class="check-item" data-category="formatting">
+                            <input type="checkbox">
+                            <span>Consistent Formatting</span>
+                        </div>
+                        <div class="check-item" data-category="formatting">
+                            <input type="checkbox">
+                            <span>Proper Use of Code Blocks</span>
+                        </div>
+                        <!-- Completeness -->
+                        <div class="check-item" data-category="completeness">
+                            <input type="checkbox">
+                            <span>Missing Sections / Incomplete Content</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Expected Output -->
+                <div class="form-group">
+                    <label>Expected Output</label>
+                    <p class="form-hint">Select what the review should produce:</p>
+                    <div class="output-options" id="confluence-output-options">
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="conf-out-summary" checked>
+                            <span>Review Summary as footer comment</span>
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="conf-out-inline" checked>
+                            <span>Inline comments on specific issues</span>
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="conf-out-suggestions">
+                            <span>Rewrite suggestions for flagged sections</span>
+                        </div>
+                    </div>
+                    <div class="add-item-row">
+                        <input type="text" id="confluence-add-output-input" placeholder="Add custom expected output..." class="add-item-input">
+                        <button type="button" id="confluence-add-output-btn" class="add-item-btn">+ Add</button>
+                    </div>
+                </div>
+
+                <button id="start-confluence-pr-review-btn" style="display:none;">PR Review</button>
+                <button id="start-confluence-pr-only-btn" style="display:none;">PR Only</button>
+                <div class="panel-actions">
+                    <button class="btn-primary" id="start-confluence-review-btn">Run Review</button>
+                    <button class="btn-secondary" id="confluence-back-to-chat-btn">Back to Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Account Setup Modal -->
+    <div class="help-modal" id="auth-settings-modal">
+        <div class="help-modal-content auth-settings-content">
+            <div class="help-modal-header">
+                <h2>Account Setup</h2>
+                <button class="help-modal-close" id="auth-settings-close">&times;</button>
+            </div>
+
+            <div class="help-modal-body auth-settings-body auth-view-grid" id="auth-settings-view">
+                <p class="auth-intro">Manage runtime credentials used for GitHub and Confluence reviews.</p>
+                <div class="auth-display-row">
+                    <label>Confluence Email</label>
+                    <span id="view-confluence-email" class="plain-value">Not set</span>
+                </div>
+                <div class="auth-display-row">
+                    <label>Confluence API Token</label>
+                    <span id="view-confluence-token" class="masked-value">Not set</span>
+                </div>
+                <div class="auth-display-row">
+                    <label>GitHub Owner</label>
+                    <span id="view-github-owner" class="plain-value">Not set</span>
+                </div>
+                <div class="auth-display-row">
+                    <label>GitHub Token</label>
+                    <span id="view-github-token" class="masked-value">Not set</span>
+                </div>
+                <div class="auth-actions auth-actions-split">
+                    <button id="clear-auth-btn" class="btn-secondary">Clear</button>
+                    <button id="edit-auth-btn" class="btn-primary">Edit Credentials</button>
+                </div>
+            </div>
+
+            <div class="help-modal-body auth-settings-body" id="auth-settings-edit" style="display:none;">
+                <div class="auth-form-grid">
+                    <label for="edit-confluence-email">Confluence Email</label>
+                    <input type="email" id="edit-confluence-email" placeholder="name@example.com" autocomplete="email">
+
+                    <label for="edit-confluence-token">Confluence API Token</label>
+                    <div class="token-input-wrap">
+                        <input type="password" id="edit-confluence-token" placeholder="Enter Confluence API token" autocomplete="off" spellcheck="false">
+                        <button type="button" class="token-toggle" data-target="edit-confluence-token" aria-pressed="false">Show</button>
+                    </div>
+
+                    <label for="edit-github-owner">GitHub Owner</label>
+                    <input type="text" id="edit-github-owner" placeholder="org-or-username" autocomplete="username" spellcheck="false">
+
+                    <label for="edit-github-token">GitHub Token</label>
+                    <div class="token-input-wrap">
+                        <input type="password" id="edit-github-token" placeholder="Enter GitHub token" autocomplete="off" spellcheck="false">
+                        <button type="button" class="token-toggle" data-target="edit-github-token" aria-pressed="false">Show</button>
+                    </div>
+                </div>
+                <p class="form-hint">Credentials are stored in your browser for this app and sent as runtime auth with requests.</p>
+                <div class="auth-actions">
+                    <button id="cancel-auth-btn" class="btn-secondary">Cancel</button>
+                    <button id="save-auth-btn" class="btn-primary">Save Credentials</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help Guide Modal -->
+    <div class="help-modal" id="help-modal">
+        <div class="help-modal-content">
+            <div class="help-modal-header">
+                <h2>Quick User Guide</h2>
+                <button class="help-modal-close" id="help-modal-close">&times;</button>
+            </div>
+            <div class="help-modal-body">
+                <p class="help-intro">MunnAI helps you run guided code and content reviews with structured outputs, inline comments, and summary insights.</p>
+
+                <div class="help-feature-grid">
+                    <article class="help-feature-card">
+                        <h3>GitHub PR Review</h3>
+                        <ul>
+                            <li>Parse GitHub PR links and inspect changed files.</li>
+                            <li>Run checklist-based review rules in one flow.</li>
+                            <li>Produce inline comments, file-level notes, and summary feedback.</li>
+                        </ul>
+                    </article>
+                    <article class="help-feature-card">
+                        <h3>Confluence Review</h3>
+                        <ul>
+                            <li>Review pages by URL or page ID.</li>
+                            <li>Detect grammar, readability, and structure issues.</li>
+                            <li>Post inline and footer comments with optional rewrite suggestions.</li>
+                        </ul>
+                    </article>
+                    <article class="help-feature-card">
+                        <h3>Account Setup</h3>
+                        <ul>
+                            <li>Store GitHub owner/token and Confluence email/token.</li>
+                            <li>Use show/hide controls for token fields while editing.</li>
+                            <li>Send credentials as runtime auth for each request.</li>
+                        </ul>
+                    </article>
+                    <article class="help-feature-card">
+                        <h3>Live Progress</h3>
+                        <ul>
+                            <li>See real-time review steps in the chat stream.</li>
+                            <li>Auto-fallback to direct requests if streaming is unavailable.</li>
+                            <li>Track final status in the request hint area.</li>
+                        </ul>
+                    </article>
+                </div>
+
+                <h3>Fast Workflow</h3>
+                <ol>
+                    <li>Configure credentials in <strong>Account Setup</strong>.</li>
+                    <li>Choose <strong>GitHub PR Review</strong> or <strong>Confluence Page Review</strong>.</li>
+                    <li>Parse the link, pick checklist items, and start the review.</li>
+                    <li>Watch live progress and copy outcomes from chat.</li>
+                </ol>
+
+                <div class="help-cta-row">
+                    <button class="btn-primary" id="start-tour-btn" type="button">Start Interactive Tour</button>
+                    <a class="btn-secondary help-guide-link" href="/quick-user-guide">Open Full User Guide</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Progress Panel for Reviews -->
+    <div id="review-progress-panel" class="review-progress-panel" style="display: none;">
+        <div class="progress-header">
+            <span class="progress-spinner">⏳</span>
+            <span class="progress-title">Review in progress...</span>
+            <span class="progress-time">(0s elapsed)</span>
+            <button class="progress-toggle">▼</button>
+        </div>
+        <div class="progress-details" style="display: none;">
+            <div id="progress-log" class="progress-log"></div>
+        </div>
+    </div>
+
+    <!-- Main Chat Area -->
+    <div class="main" id="main-chat">
+        <div class="chat-area" id="chat-scroll">
+            <div class="chat-inner" id="chat">
+                <div class="msg bot"><div class="msg-inner"><div class="msg-body"><span id="welcome-typing"></span><span id="welcome-cursor" class="loading-cursor">|</span></div></div></div>
+            </div>
+        </div>
+        <div class="input-bar">
+            <div class="input-wrap">
+                <textarea id="input" placeholder="Paste a link or type a prompt... (Ctrl+Enter to send)" rows="1"></textarea>
+                <button class="send-btn" id="send">Send</button>
+            </div>
+            <div class="request-meta">
+                <div class="request-hint" id="request-hint">Live progress is shown while MunnAI works through your request.</div>
+            </div>
+        </div>
+    </div>
+
 </body>
+<script src="{{ url_for('static', filename='index.js') }}"></script>
 </html>

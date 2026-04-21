@@ -1,3 +1,4 @@
+import html
 import logging
 import re
 from typing import Optional, Tuple
@@ -38,6 +39,16 @@ class ConfluenceAPI:
         session.auth = (self.email, self.api_token)
         return session
 
+    def set_runtime_auth(self, email: str | None = None, api_token: str | None = None, base_url: str | None = None) -> None:
+        """Update active Confluence credentials for this runtime process."""
+        if isinstance(email, str) and email.strip():
+            self.email = email.strip()
+        if isinstance(api_token, str) and api_token.strip():
+            self.api_token = api_token.strip()
+        if isinstance(base_url, str) and base_url.strip():
+            self.base_url = base_url.strip().rstrip("/")
+        self.session.auth = (self.email, self.api_token)
+
     def _request(self, method: str, endpoint: str, **kwargs) -> Tuple[Optional[requests.Response], Optional[str]]:
         """Send a Confluence API request and return either the response or an error message."""
         url = f"{self.base_url}{endpoint}"
@@ -46,8 +57,17 @@ class ConfluenceAPI:
             response.raise_for_status()
             return response, None
         except requests.RequestException as e:
-            logger.error(f"Request failed: {e}")
-            return None, str(e)
+            detail = ""
+            response = getattr(e, "response", None)
+            if response is not None:
+                try:
+                    body = (response.text or "").strip()
+                    if body:
+                        detail = f" | response: {body[:500]}"
+                except Exception:
+                    detail = ""
+            logger.error(f"Request failed: {e}{detail}")
+            return None, f"{e}{detail}"
 
     # Spaces
     def create_space(self, name: str, key: str, description: str) -> Tuple[Optional[requests.Response], Optional[str]]:
@@ -121,7 +141,7 @@ class ConfluenceAPI:
     def _markdown_to_confluence_html(text: str) -> str:
         """Convert common Markdown patterns to Confluence storage-format HTML."""
         # If it already looks like HTML, return as-is
-        if re.search(r"<(?:p|ul|ol|h[1-6]|table|div|strong|em)", text):
+        if re.search(r"<(?:p|ul|ol|h[1-6]|table|div|strong|em)\b", text):
             return text
         lines = text.split("\n")
         html_parts: list[str] = []
@@ -140,7 +160,7 @@ class ConfluenceAPI:
                     html_parts.append("</ul>")
                     in_list = False
                 level = len(heading_match.group(1))
-                heading_text = heading_match.group(2)
+                heading_text = html.escape(heading_match.group(2))
                 html_parts.append(f"<h{level}>{heading_text}</h{level}>")
                 continue
             # Horizontal rule
@@ -156,14 +176,14 @@ class ConfluenceAPI:
                 if not in_list:
                     html_parts.append("<ul>")
                     in_list = True
-                item_text = list_match.group(1)
+                item_text = html.escape(list_match.group(1))
                 html_parts.append(f"<li>{item_text}</li>")
                 continue
             # Regular paragraph
             if in_list:
                 html_parts.append("</ul>")
                 in_list = False
-            html_parts.append(f"<p>{stripped}</p>")
+            html_parts.append(f"<p>{html.escape(stripped)}</p>")
         if in_list:
             html_parts.append("</ul>")
         # Inline formatting: **bold** and *italic*
@@ -173,12 +193,45 @@ class ConfluenceAPI:
         return result
 
     def post_footer_comment(self, page_id: str, comment: str) -> Tuple[Optional[requests.Response], Optional[str]]:
-        """Post a footer comment to the target Confluence page."""
+        """Post a footer comment to the target Confluence page, trying v2 first then v1."""
         if not page_id or not comment:
             return None, "page_id and comment are required"
+
         html_comment = self._markdown_to_confluence_html(comment)
-        data = {"type": "comment", "body": {"storage": {"value": html_comment, "representation": "storage"}}, "container": {"type": "page", "id": page_id}}
-        return self._request("POST", "/rest/api/content", json=data)
+
+        resolved_page_id = int(page_id) if str(page_id).isdigit() else page_id
+        v2_data = {
+            "pageId": resolved_page_id,
+            "body": {
+                "representation": "storage",
+                "value": html_comment,
+            },
+        }
+        response, error = self._request("POST", "/api/v2/footer-comments", json=v2_data)
+        if response is not None and not error:
+            return response, None
+
+        logger.warning("Footer comment v2 failed for page %s, trying v1 content fallback: %s", page_id, error)
+        v1_data = {
+            "type": "comment",
+            "container": {"id": str(page_id), "type": "page", "status": "current"},
+            "body": {
+                "storage": {
+                    "value": html_comment,
+                    "representation": "storage",
+                }
+            },
+        }
+        legacy_response, legacy_error = self._request("POST", "/rest/api/content", json=v1_data)
+        if legacy_response is not None and not legacy_error:
+            return legacy_response, None
+
+        combined_error = (
+            f"v2 failed: {error}; "
+            f"v1 content failed: {legacy_error}"
+        )
+        logger.error("Footer comment failed for page %s on all APIs: %s", page_id, combined_error)
+        return None, combined_error
 
     def post_inline_comment(
         self,
@@ -186,6 +239,7 @@ class ConfluenceAPI:
         comment: str,
         text_selection: str,
         original_position: Optional[int] = None,
+        match_index: Optional[int] = None,
         page_text: Optional[str] = None,
     ) -> Tuple[Optional[dict], Optional[str]]:
         """Post an inline comment anchored to matching text on a page.
@@ -214,7 +268,13 @@ class ConfluenceAPI:
             return None, f"text_selection '{selection}' not found in page"
 
         match_count = len(matches)
-        if isinstance(original_position, int) and original_position >= 0:
+        if isinstance(match_index, int):
+            if match_index < 0:
+                return None, "match_index must be >= 0"
+            if match_index >= match_count:
+                return None, f"match_index {match_index} out of range for {match_count} occurrences"
+        elif isinstance(original_position, int) and original_position >= 0:
+            # Backward-compatible anchor resolution by nearest character offset.
             match_index = min(range(match_count), key=lambda i: abs(matches[i] - original_position))
         else:
             match_index = 0
