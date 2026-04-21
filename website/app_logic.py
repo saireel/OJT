@@ -995,6 +995,27 @@ When the user asks to review a GitHub pull request:
 5. Example tool call:
    TOOL_CALL: review_pull_request_tool
    ARGS: {"repo": "owner/repo", "pr_number": 123, "checklist": [{"id": "...", "name": "...", "description": "...", "enabled": true, "execution_order": 10}]}
+APPLYING CUSTOM INSTRUCTIONS TO A PR:
+If the user provides explicit review instructions in chat (e.g. "use this checklist:", "focus on X", "flag Y"),
+BEFORE calling review_pull_request_tool, derive a task contract from those instructions and extend the checklist
+to cover every required check. Treat user-provided rules with the same weight as checklist items.
+After the tool call, if the instructions required specific output formats (inline comment per class, summary table, etc.)
+verify those are satisfied and use post_confluence_inline_comment or additional tool calls as needed.
+PR CODING STANDARDS ENFORCEMENT:
+The review MUST cover:
+- Naming convention violations (PascalCase classes, camelCase JS/TS functions, snake_case Python functions)
+- Consistent formatting and indentation across all changed files
+- Code structure issues (overly long/complex functions, missing abstractions)
+- Cross-file consistency: ensure changes align with related modules in naming, patterns, and behavior
+- Security-sensitive patterns (hardcoded secrets, missing input validation, SQL/XSS risks)
+- Missing documentation (undocumented public functions, inaccurate comments)
+- DRY violations and unused code
+When posting inline comments, always explain the issue AND the correct fix in a clear, actionable way
+so developers can learn from the feedback, not just know something is wrong.
+Use a consistent format for all review findings:
+  Issue: <what is wrong>
+  Rule: <which convention or standard it violates>
+  Fix: <specific recommended change>
 """
 # --- Tool Registry ---
 # This dictionary maps tool names to functions that call them.
@@ -1304,7 +1325,7 @@ def _build_agent_prompt(
         + verification_reminder
         + f"\n\n[Agent step {step + 1}] What do you do next?"
     )
-def run_agent(user_msg: str, history: list, link_context: str, request_meta: dict | None = None) -> str:
+def run_agent(user_msg: str, history: list, link_context: str, request_meta: dict | None = None, progress_callback=None) -> str:
     """
     ReAct + Verify-Then-Continue agent loop.
     LLM -> Tool -> Observation -> Verify -> LLM -> ... -> FINAL_ANSWER
@@ -1478,6 +1499,8 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
     step_budget = _step_budget_for_request(user_msg)
     for step in range(step_budget):
         print(f"[AGENT] Step {step + 1}/{step_budget}", flush=True)
+        if progress_callback:
+            progress_callback(f"Thinking... (step {step + 1})")
         prompt = _build_agent_prompt(
             AGENT_SYSTEM_PROMPT,
             link_context,
@@ -1521,6 +1544,9 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
             scratchpad.append({"tool": tool_name, "input": args, "output": observation})
             continue
         print(f"[AGENT] Calling tool: {tool_name} | args: {json.dumps(args, default=str)[:300]}", flush=True)
+        if progress_callback:
+            _tool_label = tool_name.replace("_", " ")
+            progress_callback(f"Using tool: {_tool_label}...")
         # --- Execute tool ---
         if tool_name == "post_confluence_inline_comment" and args.get("page_id") and args.get("text_selection"):
             # Prevent repeated comments on match_index=0 by auto-advancing match_index.

@@ -8,13 +8,13 @@
         :root {
             --ink: #1a1c23;
             --muted: #5a6072;
-            --card: #ffffff;
-            --bg-a: #f8fbff;
-            --bg-b: #f6f1ff;
+            --card: #efe1e9;
+            --bg-a: #eec8f7;
+            --bg-b: #fec4ea;
             --line: #d7deeb;
-            --primary: #2254f4;
-            --primary-2: #7a36d6;
-            --accent-soft: #eef2ff;
+            --primary: #b10fa7;
+            --primary-2: #f491d8;
+            --accent-soft: #e679d9;
         }
 
         * { box-sizing: border-box; }
@@ -200,11 +200,27 @@
         <section class="feature-grid">
             <article class="feature-card">
                 <h2>PR Review Automation</h2>
-                <p>Parse PR links, inspect changed files, and run checklist-driven quality checks quickly.</p>
+                <p>Parse PR links, inspect changed files, and run checklist-driven quality checks. Posts inline comments and a footer summary automatically.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Coding Standards Enforcement</h2>
+                <p>Detects naming convention violations (PascalCase, camelCase, snake_case), formatting issues, structural problems, and cross-file consistency gaps.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Custom Review Instructions</h2>
+                <p>Paste your own checklist or rules in chat before reviewing a PR. MunnAI merges them with built-in checks and applies every rule to the review.</p>
             </article>
             <article class="feature-card">
                 <h2>Confluence Content Review</h2>
                 <p>Review pages for readability, grammar, and structure, with inline and footer outputs.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Developer Learning Feedback</h2>
+                <p>Every inline comment explains the issue, the violated rule, and a specific fix — so developers understand why, not just what.</p>
+            </article>
+            <article class="feature-card">
+                <h2>Standardized Output Format</h2>
+                <p>All findings follow a consistent Issue / Rule / Fix format, ensuring reviewers and developers get uniform, actionable feedback every time.</p>
             </article>
             <article class="feature-card">
                 <h2>Runtime Credentials</h2>
@@ -222,14 +238,25 @@
                 <ol class="flow-list">
                     <li>Open <strong>Account Setup</strong> and fill GitHub owner/token plus Confluence email/token.</li>
                     <li>Choose <strong>GitHub PR Review</strong> or <strong>Confluence Page Review</strong> from the sidebar.</li>
-                    <li>Paste link or page ID, then click <strong>Parse</strong> to validate input.</li>
-                    <li>Select checklist rules and expected outputs.</li>
+                    <li>Paste the PR or page link, then click <strong>Parse</strong> to validate input.</li>
+                    <li>Select checklist rules and expected outputs, or paste custom instructions in chat.</li>
                     <li>Start review and monitor streamed progress in chat.</li>
+                    <li>Inline comments and a footer summary are posted automatically to the PR or page.</li>
                 </ol>
 
-                <h3>Custom Instructions</h3>
-                <p>For now, include your own rules directly in chat before launching a review.</p>
-                <div class="tip">Tip: Keep your reusable checklist prompt in a local note, then paste it when needed.</div>
+                <h3>Applying Custom Instructions to a PR</h3>
+                <p>Paste your own checklist or rules in chat before starting a review. MunnAI reads them and extends the standard checklist automatically.</p>
+                <div class="tip">Example: "Use this checklist for my next review: validate naming consistency, flag long lines, report security patterns. Expected output: inline comments + summary with top risks."</div>
+
+                <h3>What Gets Checked Automatically</h3>
+                <ul class="flow-list">
+                    <li>Naming conventions: PascalCase classes, camelCase JS/TS, snake_case Python</li>
+                    <li>Consistent formatting and indentation across changed files</li>
+                    <li>Cross-file consistency (naming, patterns, behavior alignment)</li>
+                    <li>Security risks: hardcoded secrets, missing validation, SQL/XSS</li>
+                    <li>Code quality: DRY violations, unused variables, complex functions</li>
+                    <li>Documentation: missing docstrings, inaccurate comments</li>
+                </ul>
             </article>
 
             <article class="panel">
@@ -238,15 +265,23 @@
 - Validate naming consistency
 - Flag long lines and unclear comments
 - Report security-sensitive patterns
+- Check cross-file naming alignment
 Expected output:
 - Inline comments for exact lines
 - One summary comment with top risks</pre>
 
+                <h3 style="margin-top:14px;">Inline Comment Format</h3>
+                <pre>Issue: Function name uses PascalCase
+Rule: JS/TS functions must use camelCase
+Fix: Rename getUser() to getUser (already correct)
+     rename CreateUser() to createUser()</pre>
+
                 <h3 style="margin-top:14px;">Fast Tips</h3>
                 <ul class="flow-list">
                     <li>Use Ctrl+Enter to send chat messages quickly.</li>
+                    <li>Paste custom rules in chat before starting a review.</li>
                     <li>Click outside a panel or modal to close it.</li>
-                    <li>If parsing fails, verify link format first.</li>
+                    <li>If parsing fails, verify the PR or page link format first.</li>
                 </ul>
             </article>
         </section>

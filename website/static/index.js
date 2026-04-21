@@ -405,6 +405,51 @@ function createStreamingBubble() {
     return { textEl: bubble.querySelector(".stream-text"), cursorEl: bubble.querySelector(".cursor") };
 }
 
+function createAssistantMessageBubble(text) {
+    const bubble = document.createElement("div");
+    bubble.className = "msg bot";
+    bubble.innerHTML = '<div class="msg-inner"><div class="msg-time"></div><div class="msg-body"></div></div>';
+    bubble.querySelector(".msg-time").textContent = currentChatTimestamp();
+    bubble.querySelector(".msg-body").innerHTML = renderSimpleMarkdown(String(text || ""));
+    chat.appendChild(bubble);
+    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+    return bubble;
+}
+
+function getLocalFastSmalltalkReply(text) {
+    const normalized = String(text || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s?!.,]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[?!.,]+/g, "")
+        .trim();
+
+    if (!normalized) return null;
+
+    const quickGreetings = new Set(["hi", "hello", "hey", "yo", "hii", "hey there", "hello there", "hi there"]);
+    const greetingWords = new Set(["hi", "hello", "hey", "yo", "hii"]);
+    const greetingTargets = new Set(["there", "munnai", "assistant", "ai"]);
+    const tokens = normalized.split(" ").filter(Boolean);
+
+    if (quickGreetings.has(normalized)) {
+        return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed.";
+    }
+    if (tokens.length > 0 && tokens.length <= 3 && greetingWords.has(tokens[0])) {
+        if (tokens.length === 1 || greetingTargets.has(tokens[1])) {
+            return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed.";
+        }
+    }
+    if (["thanks", "thank you", "ty", "tnx"].includes(normalized)) {
+        return "You are welcome. I can help with PR reviews, Confluence checks, and account setup too.";
+    }
+    if (["ok", "okay", "k", "cool", "nice"].includes(normalized)) {
+        return "Great. Send the next task when you are ready.";
+    }
+
+    return null;
+}
+
 function streamText(textEl, cursorEl, text, speed = 8) {
     let i = 0;
     const fullText = String(text || "");
@@ -694,25 +739,74 @@ send.addEventListener("click", async function() {
     requestHint.textContent = "Processing...";
     requestHint.style.color = "#666";
 
-    // ✅ SHOW TYPING DOTS IMMEDIATELY
+    const localFastReply = getLocalFastSmalltalkReply(msg);
+    if (localFastReply) {
+        createAssistantMessageBubble(localFastReply);
+        chatHistory.push({role: "assistant", text: localFastReply});
+        requestHint.textContent = "Ready for next request";
+        requestHint.style.color = "#999";
+        return;
+    }
+
+    // SHOW TYPING DOTS IMMEDIATELY
     const typingBubble = createTypingBubble();
+    let progressBubble = null;
 
     try {
-        var res = await fetch("/api/chat", {
+        var sseRes = await fetch("/api/chat-stream", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
         });
 
-        var data = await res.json();
-        var response = data.response || data.error || "No response";
+        if (!sseRes.ok || !sseRes.body) {
+            throw new Error("SSE unavailable");
+        }
 
-        // ✅ REMOVE TYPING DOTS
+        const sseReader = sseRes.body.getReader();
+        const sseDec = new TextDecoder();
+        let sseBuf = "";
+        let finalResponse = null;
+        let finalDetected = null;
+
+        outer: while (true) {
+            const { value, done } = await sseReader.read();
+            if (done) break;
+            sseBuf += sseDec.decode(value, { stream: true });
+            const parts = sseBuf.split("\n\n");
+            sseBuf = parts.pop();
+            for (const part of parts) {
+                if (!part.startsWith("data: ")) continue;
+                let evt;
+                try { evt = JSON.parse(part.slice(6)); } catch(e) { continue; }
+                if (evt.type === "progress") {
+                    removeTypingBubble(typingBubble);
+                    if (!progressBubble) {
+                        progressBubble = document.createElement("div");
+                        progressBubble.className = "msg bot typing-bubble";
+                        progressBubble.innerHTML = '<div class="msg-inner"><div class="msg-body" style="font-style:italic;opacity:0.7;font-size:0.9em;"></div></div>';
+                        chat.appendChild(progressBubble);
+                        chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+                    }
+                    progressBubble.querySelector(".msg-body").textContent = evt.message;
+                    requestHint.textContent = evt.message;
+                } else if (evt.type === "done") {
+                    try { const d = JSON.parse(evt.message); finalResponse = d.response || "No response"; finalDetected = d.detected; } catch(e) { finalResponse = evt.message; }
+                } else if (evt.type === "error") {
+                    finalResponse = evt.message;
+                } else if (evt.type === "heartbeat") {
+                    // keep-alive, ignore
+                }
+            }
+        }
+
+        if (progressBubble) progressBubble.remove();
         removeTypingBubble(typingBubble);
 
-        // ✅ STREAM RESPONSE
-        const { textEl, cursorEl } = createStreamingBubble();
-        streamText(textEl, cursorEl, response, 10);
+        var response = finalResponse || "No response";
+        var data = { response, detected: finalDetected };
+
+        createAssistantMessageBubble(response);
 
         chatHistory.push({role: "assistant", text: response});
 
@@ -720,15 +814,36 @@ send.addEventListener("click", async function() {
         requestHint.style.color = "#999";
 
     } catch (err) {
-        // ❌ ERROR HANDLING
+        // FALLBACK to non-streaming /api/chat
+        if (progressBubble) progressBubble.remove();
         removeTypingBubble(typingBubble);
+        const typingBubble2 = createTypingBubble();
+        try {
+            var res2 = await fetch("/api/chat", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
+            });
+            var data2 = await res2.json();
+            var response2 = data2.response || data2.error || "No response";
+            removeTypingBubble(typingBubble2);
+            createAssistantMessageBubble(response2);
+            chatHistory.push({role: "assistant", text: response2});
+            requestHint.textContent = "Ready for next request";
+            requestHint.style.color = "#999";
+            return;
+        } catch(err2) {
+            removeTypingBubble(typingBubble2);
+        }
+        // ERROR HANDLING (only if fallback also failed)
+        var _err = err2 || err;
 
         var errorMsg = document.createElement("div");
         errorMsg.className = "msg bot";
         errorMsg.innerHTML = `
             <div class="msg-inner" style="border-color:#d32f2f;color:#d32f2f;">
                 <div class="msg-time">${currentChatTimestamp()}</div>
-                <div class="msg-body">Error: ${(err.message || "Unknown error").replace(/</g,"&lt;")}</div>
+                <div class="msg-body">Error: ${((_err && _err.message) || "Unknown error").replace(/</g,"&lt;")}</div>
             </div>
         `;
         chat.appendChild(errorMsg);

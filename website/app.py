@@ -1,6 +1,7 @@
 # app.py
 # Thin Flask entrypoint: routes only. Core logic lives in app_logic.py.
 import atexit
+import queue
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 
 try:
@@ -8,9 +9,7 @@ try:
 except ImportError:
     import app_logic as _logic
 
-_extract_confluence_page_ids_from_text = _logic._extract_confluence_page_ids_from_text
 _extract_prs_from_text = _logic._extract_prs_from_text
-_fallback_links_from_history = _logic._fallback_links_from_history
 _try_fast_confluence_spelling_review = _logic._try_fast_confluence_spelling_review
 run_agent = _logic.run_agent
 normalize_user_auth = _logic.normalize_user_auth
@@ -57,7 +56,6 @@ def _resolve_confluence_checklist_page_id(checklist):
 set_active_user_auth = _logic.set_active_user_auth
 clear_active_user_auth = _logic.clear_active_user_auth
 FEEDBACK_FILE = _logic.FEEDBACK_FILE
-_build_universal_pr_review_checklist = _logic._build_universal_pr_review_checklist
 _build_checklist_from_panel = _logic._build_checklist_from_panel
 _get_cached_pr_checklist = _logic._get_cached_pr_checklist
 _get_cached_chat_link_metadata = _logic._get_cached_chat_link_metadata
@@ -79,14 +77,25 @@ def _try_fast_smalltalk_response(user_msg: str) -> str | None:
     if not user_msg:
         return None
     normalized = re.sub(r"[^a-z0-9\s?!.,]", "", user_msg.lower()).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized_no_punct = re.sub(r"[?!.,]+", "", normalized).strip()
+
     quick_greetings = {
         "hi", "hello", "hey", "yo", "hii", "hey there", "hello there", "hi there"
     }
-    if normalized in quick_greetings:
+    greeting_words = {"hi", "hello", "hey", "yo", "hii"}
+    greeting_targets = {"there", "munnai", "assistant", "ai"}
+
+    parts = normalized_no_punct.split()
+    if normalized_no_punct in quick_greetings:
         return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed."
-    if normalized in {"thanks", "thank you", "ty", "tnx"}:
+    if parts and parts[0] in greeting_words and len(parts) <= 3:
+        if len(parts) == 1 or parts[1] in greeting_targets:
+            return "Hi! I am ready. Share a PR link, Confluence page link, or tell me what you want reviewed."
+
+    if normalized_no_punct in {"thanks", "thank you", "ty", "tnx"}:
         return "You are welcome. I can help with PR reviews, Confluence checks, and account setup too."
-    if normalized in {"ok", "okay", "k", "cool", "nice"}:
+    if normalized_no_punct in {"ok", "okay", "k", "cool", "nice"}:
         return "Great. Send the next task when you are ready."
     return None
 
@@ -94,8 +103,6 @@ def _try_fast_smalltalk_response(user_msg: str) -> str | None:
 _PR_FILES_CACHE_TTL_S = 45
 _PR_FILES_CACHE: dict[tuple, tuple[float, list]] = {}
 _PR_FILES_CACHE_LOCK = threading.Lock()
-_DEFERRED_CHECK_IDS = {"spelling_grammar", "repeated_words", "cross_file_consistency"}
-_DEFAULT_INLINE_COMMENT_LIMIT = 6
 _STRICT_INLINE_COMMENT_LIMIT = 12
 
 
@@ -135,9 +142,7 @@ def index():
 def quick_user_guide():
     """Renders the quick user guide page."""
     return render_template("quick_user_guide.html")
-# --- Agent System Prompt ---
-# This is a long string that defines the rules and workflow for the AI agent.
-# It tells the agent how to process user requests, use tools, and when to stop.
+
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -233,6 +238,114 @@ def chat():
         return jsonify({"response": response, "detected": detected if detected else None})
     finally:
         clear_active_user_auth()
+
+@app.route("/api/chat-stream", methods=["POST"])
+def chat_stream():
+    """POST /api/chat-stream - streams agent progress as SSE, then delivers the final answer instantly."""
+    data = request.get_json(silent=True) or {}
+    user_msg = data.get("prompt", "").strip()
+    history = data.get("history", [])
+    user_auth = normalize_user_auth(data.get("user_auth", {}))
+    review_type = (data.get("review_type") or "").strip()
+    doc_type = (data.get("doc_type") or "").strip()
+    checklist = data.get("checklist", [])
+    outputs = data.get("outputs", [])
+    confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist) or (data.get("confluence_checklist_page_id") or "").strip()
+
+    if not user_msg:
+        def _err_gen():
+            yield 'data: {"type":"error","message":"Empty prompt"}\n\n'
+        return Response(stream_with_context(_err_gen()), mimetype="text/event-stream")
+
+    def generate():
+        q = queue.Queue()
+        SENTINEL = object()
+
+        def _fmt(event_type, message):
+            return "data: " + json.dumps({"type": event_type, "message": message}) + "\n\n"
+
+        def _run():
+            try:
+                from . import app_logic as _al
+            except ImportError:
+                import app_logic as _al
+            _al.set_active_user_auth(user_auth)
+            try:
+                link_meta, link_meta_from_cache = _get_cached_chat_link_metadata(user_msg, history)
+                page_ids = link_meta.get("page_ids", [])
+                prs = link_meta.get("prs", [])
+                link_source = link_meta.get("link_source", "current_message")
+                link_context = ""
+                if page_ids:
+                    hdr = "Detected Confluence page IDs from recent conversation history (follow-up context):\n" if link_source == "history_fallback" else "Detected Confluence page IDs from the user's message:\n"
+                    link_context += hdr
+                    for idx, pid in enumerate(page_ids):
+                        link_context += "  Link {}: page_id = \"{}\"\n".format(idx + 1, pid)
+                    link_context += "\n"
+                if prs:
+                    hdr = "Detected GitHub PRs from recent conversation history (follow-up context):\n" if link_source == "history_fallback" else "Detected GitHub PRs from the user's message:\n"
+                    link_context += hdr
+                    for pr in prs:
+                        link_context += "  PR: {}/{}#{}\n".format(pr["owner"], pr["repo"], pr["pr_number"])
+                    link_context += "\n"
+                if link_meta_from_cache:
+                    link_context += "Reused cached link metadata for this chat request.\n\n"
+                if review_type:
+                    link_context += "Review type: {}\n".format(review_type)
+                if doc_type:
+                    link_context += "Document type: {}\n".format(doc_type)
+                if checklist:
+                    link_context += "Checklist items: " + ", ".join(str(item) for item in checklist) + "\n"
+                if outputs:
+                    link_context += "Expected outputs: " + ", ".join(str(item) for item in outputs) + "\n"
+                if confluence_checklist_page_id:
+                    link_context += "Confluence checklist page: {}\n".format(confluence_checklist_page_id)
+                detected = ["confluence:{}".format(pid) for pid in page_ids]
+                detected += ["pr:{}/{}#{}".format(pr["owner"], pr["repo"], pr["pr_number"]) for pr in prs]
+
+                def _progress(msg):
+                    q.put(("progress", msg))
+
+                response = _al.run_agent(
+                    user_msg, history, link_context,
+                    request_meta={
+                        "page_ids": page_ids,
+                        "prs": prs,
+                        "review_type": review_type,
+                        "doc_type": doc_type,
+                        "checklist": checklist,
+                        "outputs": outputs,
+                        "confluence_checklist_page_id": confluence_checklist_page_id,
+                        "link_source": link_source,
+                    },
+                    progress_callback=_progress,
+                )
+                q.put(("done", json.dumps({"response": response, "detected": detected or None})))
+            except Exception as exc:
+                q.put(("error", str(exc)))
+            finally:
+                _al.clear_active_user_auth()
+                q.put(SENTINEL)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        while True:
+            try:
+                item = q.get(timeout=30)
+            except queue.Empty:
+                yield _fmt("heartbeat", "")
+                continue
+            if item is SENTINEL:
+                break
+            event_type, payload = item
+            yield _fmt(event_type, payload)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
 # --- Feedback API Endpoint ---
 # Lets users report false positives (e.g. a term wrongly flagged as context noise).
 # The feedback is stored in a JSON file and loaded into the AI's context on future requests.
@@ -290,14 +403,12 @@ def parse_pr():
     })
 
 
-
 @app.route("/api/review-stream", methods=["POST"])
 def review_stream():
     """POST /api/review-stream - streams PR review progress as Server-Sent Events."""
     data = request.get_json(silent=True) or {}
     user_msg = data.get("prompt", "").strip()
-    panel_checklist = data.get("checklist", [])  # List of checked item names from panel
-    panel_outputs = data.get("outputs", [])      # List of expected output types from panel
+    panel_checklist = data.get("checklist", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
     github_base_url = data.get("github_base_url")  # Extracted from the link by frontend
 
@@ -305,8 +416,6 @@ def review_stream():
         return jsonify({"error": "Empty prompt"}), 400
 
     def generate():
-        import queue
-
         def send_event(event_type, message):
             
             return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
@@ -547,8 +656,6 @@ def confluence_review_stream():
         return jsonify({"error": "No page ID or URL provided"}), 400
 
     def generate():
-        import queue as _q
-
         def send_event(event_type, message):
             return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
                 # Check credentials upfront
@@ -562,8 +669,7 @@ def confluence_review_stream():
         # Use page_id if available, otherwise extract from page_input
         resolved_id = page_id
         if not resolved_id:
-            import re as _re
-            m = _re.search(r'pages/(\d+)', page_input)
+            m = re.search(r'pages/(\d+)', page_input)
             if m:
                 resolved_id = m.group(1)
             elif page_input.isdigit():
@@ -601,7 +707,7 @@ def confluence_review_stream():
         yield send_event("progress", "Starting page review with the selected checklist...")
         yield send_event("progress", "This may take a moment — please wait...")
 
-        result_queue = _q.Queue()
+        result_queue = queue.Queue()
 
         # Track stderr position for reading [REVIEW] messages from MCP server
         _stderr_read_idx = len(mcp_client.stderr_lines)
@@ -667,7 +773,7 @@ def confluence_review_stream():
 
         try:
             status, payload = result_queue.get_nowait()
-        except _q.Empty:
+        except queue.Empty:
             yield send_event("error", "Review thread completed but produced no result.")
             return
 
