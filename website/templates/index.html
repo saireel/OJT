@@ -122,55 +122,79 @@
                         <button class="add-item-btn deselect-all-btn" id="deselect-all-btn">Deselect All</button>
                     </div>
 
-                    <!-- Confluence-only checklist (shown when mode = "confluence") -->
+                    <!-- PR-only checklist (shown when mode = "pr") -->
                     <div class="checklist-items" id="pr-only-checklist-items" style="display:none;">
-                        <div class="check-item" data-category="spelling">
+                        <div class="check-item" data-category="naming">
                             <input type="checkbox" checked>
-                            <span>Spelling &amp; Grammar</span>
+                            <span>PascalCase Class Names</span>
                         </div>
-                        <div class="check-item" data-category="spelling">
+                        <div class="check-item" data-category="naming">
                             <input type="checkbox" checked>
-                            <span>Repeated Words</span>
+                            <span>camelCase Function Names (JS/TS)</span>
                         </div>
-                        <div class="check-item" data-category="readability">
+                        <div class="check-item" data-category="naming">
                             <input type="checkbox" checked>
-                            <span>Long Sentences (readability)</span>
+                            <span>snake_case Function Names (Python)</span>
                         </div>
-                        <div class="check-item" data-category="readability">
+                        <div class="check-item" data-category="docs">
                             <input type="checkbox" checked>
-                            <span>Long Paragraphs</span>
+                            <span>Required Comments/Docstrings</span>
                         </div>
-                        <div class="check-item" data-category="structure">
+                        <div class="check-item" data-category="docs">
                             <input type="checkbox" checked>
-                            <span>Page Structure &amp; Headings</span>
+                            <span>Comment Accuracy</span>
                         </div>
-                        <div class="check-item" data-category="structure">
-                            <input type="checkbox">
-                            <span>Table of Contents Present</span>
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox" checked>
+                            <span>Code Duplication / DRY Violations</span>
                         </div>
-                        <div class="check-item" data-category="content">
-                            <input type="checkbox">
-                            <span>Broken / Missing Links</span>
+                        <div class="check-item" data-category="quality">
+                            <input type="checkbox" checked>
+                            <span>Unused Variables / Imports</span>
                         </div>
-                        <div class="check-item" data-category="content">
+                        <div class="check-item" data-category="quality">
                             <input type="checkbox">
-                            <span>Outdated Information</span>
+                            <span>Complex / Long Functions</span>
                         </div>
-                        <div class="check-item" data-category="content">
-                            <input type="checkbox">
-                            <span>Consistent Terminology</span>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox" checked>
+                            <span>Hardcoded Secrets / Credentials</span>
                         </div>
-                        <div class="check-item" data-category="formatting">
-                            <input type="checkbox">
-                            <span>Consistent Formatting</span>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox" checked>
+                            <span>SQL Injection / XSS Risks</span>
                         </div>
-                        <div class="check-item" data-category="formatting">
-                            <input type="checkbox">
-                            <span>Proper Use of Code Blocks</span>
+                        <div class="check-item" data-category="security">
+                            <input type="checkbox" checked>
+                            <span>Input Validation</span>
                         </div>
-                        <div class="check-item" data-category="completeness">
+                        <div class="check-item" data-category="errors">
+                            <input type="checkbox" checked>
+                            <span>Proper Error Handling</span>
+                        </div>
+                        <div class="check-item" data-category="errors">
                             <input type="checkbox">
-                            <span>Missing Sections / Incomplete Content</span>
+                            <span>Edge Cases Covered</span>
+                        </div>
+                        <div class="check-item" data-category="style">
+                            <input type="checkbox" checked>
+                            <span>Flake8 / ESLint Compliance</span>
+                        </div>
+                        <div class="check-item" data-category="style">
+                            <input type="checkbox" checked>
+                            <span>Consistent Formatting / Indentation</span>
+                        </div>
+                        <div class="check-item" data-category="testing">
+                            <input type="checkbox">
+                            <span>Test Coverage for New Code</span>
+                        </div>
+                        <div class="check-item" data-category="performance">
+                            <input type="checkbox">
+                            <span>Performance / Efficiency Concerns</span>
+                        </div>
+                        <div class="check-item" data-category="consistency">
+                            <input type="checkbox" checked>
+                            <span>Cross-file Consistency</span>
                         </div>
                     </div>
 
@@ -262,23 +286,6 @@
                     </div>
                 </div>
 
-                <div class="form-group review-tuning">
-                    <label>Review Speed And Inline Noise Controls</label>
-                    <label class="check-item tuning-item">
-                        <input type="checkbox" id="fast-mode-toggle">
-                        <span>Fast mode (caps inline comments and prefers grouped findings)</span>
-                    </label>
-                    <div class="tuning-grid">
-                        <label class="tuning-field" for="max-inline-comments">Max inline comments per run
-                            <input type="number" id="max-inline-comments" min="1" max="25" value="6">
-                        </label>
-                        <label class="check-item tuning-item">
-                            <input type="checkbox" id="group-similar-inline" checked>
-                            <span>Group similar inline issues</span>
-                        </label>
-                    </div>
-                    <p class="form-hint">Fast mode auto-lowers max inline comments to 4 and forces grouped inline findings.</p>
-                </div>
 
                 <div class="panel-actions">
                     <button class="btn-primary" id="start-review-btn">Start Review</button>

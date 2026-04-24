@@ -730,40 +730,29 @@ parsePrBtn.addEventListener("click", function() {
     }
 });
 
-// Select All / Deselect All for checklist
-if (selectAllBtn && checklistItems) {
+function getActivePrChecklistContainer() {
+    var prOnlyList = document.getElementById("pr-only-checklist-items");
+    var prCombinedList = document.getElementById("pr-combined-checklist-items");
+    if (quickReviewMode === "pr") {
+        return prOnlyList || prCombinedList;
+    }
+    return prCombinedList || prOnlyList;
+}
+
+// Select All / Deselect All for PR checklist
+if (selectAllBtn) {
     selectAllBtn.addEventListener("click", function() {
-        checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
+        var activePrChecklist = getActivePrChecklistContainer();
+        if (!activePrChecklist) return;
+        activePrChecklist.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
     });
 }
-if (deselectAllBtn && checklistItems) {
+if (deselectAllBtn) {
     deselectAllBtn.addEventListener("click", function() {
-        checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
+        var activePrChecklist = getActivePrChecklistContainer();
+        if (!activePrChecklist) return;
+        activePrChecklist.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
     });
-}
-
-
-// Add expected output item
-document.getElementById("add-output-btn").addEventListener("click", function() {
-    var input = document.getElementById("add-output-input");
-    var text = input.value.trim();
-    if (!text) return;
-    var div = document.createElement("div");
-    div.className = "check-item output-item";
-    div.innerHTML = '<input type="checkbox" checked><span>' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
-    document.getElementById("output-options").appendChild(div);
-    div.querySelector(".remove-output-btn").addEventListener("click", function() { div.remove(); });
-    input.value = "";
-});
-document.getElementById("add-output-input").addEventListener("keydown", function(e) {
-    if (e.key === "Enter") { e.preventDefault(); document.getElementById("add-output-btn").click(); }
-});
-
-if (fastModeToggle) {
-    // Strict/high-confidence mode is always on.
-    fastModeToggle.checked = false;
-    fastModeToggle.disabled = true;
-    fastModeToggle.title = "Strict/high-confidence mode is enforced.";
 }
 
 
@@ -783,11 +772,8 @@ startReviewBtn.addEventListener("click", function() {
 
     if (outputs.length === 0) { showUiAlert("Please select at least one expected output type"); return; }
 
-    var items = checklistItems.querySelectorAll(".check-item");
     // AFTER — replace with this:
-    var activeChecklist = document.querySelector(
-        '#pr-only-checklist-items:not([style*="display:none"]), #pr-combined-checklist-items:not([style*="display:none"]), #confluence-only-checklist-items:not([style*="display:none"]), #confluence-combined-checklist-items:not([style*="display:none"])'
-    );
+    var activeChecklist = getActivePrChecklistContainer();
     var checklist = [];
     if (activeChecklist) {
         activeChecklist.querySelectorAll(".check-item").forEach(function(item) {
@@ -1419,20 +1405,26 @@ if (confluenceDeselectAllBtn) {
     });
 }
 
-// Add confluence expected output item
-document.getElementById("confluence-add-output-btn").addEventListener("click", function() {
-    var inp = document.getElementById("confluence-add-output-input");
-    var text = inp.value.trim();
-    if (!text) return;
-    var div = document.createElement("div");
-    div.className = "check-item output-item";
-    div.innerHTML = '<input type="checkbox" checked><span>' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
-    document.getElementById("confluence-output-options").appendChild(div);
-    inp.value = "";
-});
-document.getElementById("confluence-add-output-input").addEventListener("keydown", function(e) {
-    if (e.key === "Enter") { e.preventDefault(); document.getElementById("confluence-add-output-btn").click(); }
-});
+// Add confluence expected output item (if legacy controls are present)
+const confluenceAddOutputBtn = document.getElementById("confluence-add-output-btn");
+const confluenceAddOutputInput = document.getElementById("confluence-add-output-input");
+const confluenceOutputOptions = document.getElementById("confluence-output-options");
+
+if (confluenceAddOutputBtn && confluenceAddOutputInput && confluenceOutputOptions) {
+    confluenceAddOutputBtn.addEventListener("click", function() {
+        var text = confluenceAddOutputInput.value.trim();
+        if (!text) return;
+        var div = document.createElement("div");
+        div.className = "check-item output-item";
+        div.innerHTML = '<input type="checkbox" checked><span>' + text.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '</span>';
+        confluenceOutputOptions.appendChild(div);
+        confluenceAddOutputInput.value = "";
+    });
+
+    confluenceAddOutputInput.addEventListener("keydown", function(e) {
+        if (e.key === "Enter") { e.preventDefault(); confluenceAddOutputBtn.click(); }
+    });
+}
 
 function parseGithubPrLink(link) {
     var text = String(link || "").trim();
