@@ -25,6 +25,7 @@ from mcp_calls import (
     reply_comment,
     review_pull_request,
     cleanup_old_bot_comments,
+    summarize_pr_and_confluence,
     set_runtime_auth,
 )
 
@@ -253,6 +254,44 @@ Returns:
  - dict: {"success": True, "data": [repo_list]} If successful
          {"success": False, "error": "error message"} If retrieval fails
 """)
+
+@mcp.tool(description="""
+Summarize a GitHub Pull Request, a Confluence page, or both in one call.
+
+This tool can work in three modes:
+- PR-only when repo and pr_number are provided
+- Confluence-only when page_id is provided
+- Combined when all inputs are provided
+
+Args:
+- repo (str, optional): Repository name in format "owner/repo"
+- pr_number (int, optional): Pull request number. Required when repo is provided.
+- page_id (str, optional): Confluence page ID
+- max_files (int, optional): Max files to sample from the PR (default 6)
+- max_chars_per_file (int, optional): Max characters sampled per PR file (default 2000)
+- max_page_chars (int, optional): Max characters included from Confluence content (default 8000)
+
+Returns:
+- dict: {"success": True, "data": {..., "mode": "pr_only|page_only|combined", "summary": "..."}} if successful
+        {"success": False, "error": "..."} if retrieval or summarization fails
+""")
+def summarize_pr_and_confluence_tool(
+    repo: str = "",
+    pr_number: int = 0,
+    page_id: str = "",
+    max_files: int = 6,
+    max_chars_per_file: int = 2000,
+    max_page_chars: int = 8000,
+):
+    return summarize_pr_and_confluence(
+        repo=repo,
+        pr_number=pr_number,
+        page_id=page_id,
+        max_files=max_files,
+        max_chars_per_file=max_chars_per_file,
+        max_page_chars=max_page_chars,
+    )
+
 def list_repositories_tool():
     return list_repositories()
 

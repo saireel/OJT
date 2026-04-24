@@ -9,7 +9,6 @@ import time
 from collections import Counter, defaultdict
 from typing import Any, Dict, Optional, Tuple
 
-import config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -1577,7 +1576,7 @@ class ReviewActions:
             "table_validation": lambda: self._run_table_validation_check(page_id, storage, text, state),
         }
 
-        _checklist_page = checklist_page_id or getattr(config, "REVIEW_CHECKLIST_PAGE_ID", "")
+        _checklist_page = checklist_page_id or os.environ.get("REVIEW_CHECKLIST_PAGE_ID", "")
         custom_checklist_requested = isinstance(_checklist_page, str) and _checklist_page.strip().upper().startswith("__CUSTOM_CHECKS__:")
         checklist = self._fetch_review_checklist(_checklist_page)
         state["requested_check_ids"] = [

@@ -6,7 +6,6 @@ import difflib
 import re
 
 import requests
-import config
 import time
 from requests.exceptions import HTTPError
 

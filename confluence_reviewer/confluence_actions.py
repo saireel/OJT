@@ -1,5 +1,6 @@
 import html
 import logging
+import os
 import re
 from typing import Optional, Tuple
 
@@ -7,28 +8,48 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-import config
-
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+DEFAULT_MAX_RETRIES = _env_int("CONFLUENCE_MAX_RETRIES", 3)
+
+
 class ConfluenceAPI:
     """Minimal Confluence REST API client with session and retries."""
 
-    def __init__(self, email: str, api_token: str, base_url: str, timeout: int = 30):
-        """Store Confluence credentials and initialize the shared HTTP session."""
-        self.email = email
-        self.api_token = api_token
-        self.base_url = base_url.rstrip("/")
+    def __init__(
+        self,
+        email: str = "",
+        api_token: str = "",
+        base_url: str = "",
+        timeout: int = 30,
+        max_retries: int | None = None,
+    ):
+        """Store runtime credentials and initialize the shared HTTP session."""
+        self.email = (email or "").strip()
+        self.api_token = (api_token or "").strip()
+        self.base_url = (base_url or "").strip().rstrip("/")
         self.timeout = timeout
+        self.max_retries = DEFAULT_MAX_RETRIES if max_retries is None else max(0, int(max_retries))
         self.session = self._create_session()
 
     def _create_session(self) -> requests.Session:
         """Create a requests session with retry handling and basic auth configured."""
         session = requests.Session()
         retry_strategy = Retry(
-            total=getattr(config, "MAX_RETRIES", 3),
+            total=self.max_retries,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE"],
@@ -51,6 +72,12 @@ class ConfluenceAPI:
 
     def _request(self, method: str, endpoint: str, **kwargs) -> Tuple[Optional[requests.Response], Optional[str]]:
         """Send a Confluence API request and return either the response or an error message."""
+        if not self.base_url:
+            return None, "Confluence base URL is not configured. Set it in Account Setup."
+        if not self.email or not self.api_token:
+            return None, "Confluence credentials are not configured. Set email and API token in Account Setup."
+        if not endpoint.startswith("/"):
+            endpoint = "/" + endpoint
         url = f"{self.base_url}{endpoint}"
         try:
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
@@ -309,9 +336,5 @@ class ConfluenceAPI:
         except Exception:
             return {"status": response.status_code}, None
 
-# Reusable instance
-confluence_api = ConfluenceAPI(
-    base_url=config.BASE_URL,
-    email=config.EMAIL,
-    api_token=config.CONFLUENCE_API_TOKEN
-)
+# Reusable instance (runtime auth is applied via set_runtime_auth)
+confluence_api = ConfluenceAPI()
