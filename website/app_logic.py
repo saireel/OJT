@@ -11,6 +11,22 @@ import threading
 import time
 from flask import Flask
 import requests
+
+
+def _configure_stdio_utf8() -> None:
+    """Avoid Windows cp1252/charmap crashes when logs include emoji or other Unicode."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            # Keep startup resilient even if stream reconfiguration is unsupported.
+            pass
+
+
+_configure_stdio_utf8()
 # --- Configuration and Setup ---
 # Define paths to important files and directories
 MCP_SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -19,8 +35,6 @@ MCP_SERVER_SCRIPT = os.path.join(MCP_SERVER_DIR, "mcp_tools.py")
 app = Flask(__name__)
 # URL for the Copilot Bridge (AI agent)
 COPILOT_BRIDGE_URL = "http://127.0.0.1:5100/api/prompt"
-# Path to the feedback file where users can report false positives (e.g. terms wrongly flagged as noise)
-FEEDBACK_FILE = os.path.join(os.path.dirname(__file__), "feedback_log.json")
 # Maximum steps the AI agent can take in a single task
 MAX_AGENT_STEPS = 20  # Raised — acts as safety net, not a kill switch
 
@@ -30,7 +44,7 @@ _USER_AUTH_LOCAL = threading.local()
 def normalize_user_auth(raw: dict | None) -> dict:
     """Return a sanitized per-user auth payload used for runtime API credentials."""
     if not isinstance(raw, dict):
-        return {}
+        raw = {}
     key_map = {
         "confluence_email": "confluence_email",
         "confluence_api_token": "confluence_api_token",
@@ -46,6 +60,9 @@ def normalize_user_auth(raw: dict | None) -> dict:
             val = val.strip()
             if val:
                 out[out_key] = val
+
+    # Static defaults so GitHub actions always have a valid API host even when UI omits base URLs.
+    out.setdefault("github_base_url", "https://api.github.com")
     return out
 
 
@@ -389,28 +406,6 @@ def _get_cached_chat_link_metadata(user_msg: str, history: list) -> tuple[dict, 
         "prs": _copy_pr_entries(payload["prs"]),
         "link_source": payload["link_source"],
     }, False
-def _load_recent_feedback(limit: int = 20) -> str:
-    """Load recent user feedback so the AI can learn from past false positives."""
-    if not os.path.exists(FEEDBACK_FILE):
-        return ""
-    try:
-        with open(FEEDBACK_FILE, "r", encoding="utf-8") as f:
-            entries = [json.loads(line) for line in f if line.strip()]
-        if not entries:
-            return ""
-        recent = entries[-limit:]
-        feedback_lines = []
-        for entry in recent:
-            term = entry.get("term", "")
-            sentence = entry.get("sentence", "")
-            feedback = entry.get("feedback", "")
-            feedback_lines.append(f'  - Term: "{term}" | Context: "{sentence}" | User said: {feedback}')
-        return (
-            "\nUSER FEEDBACK ON PAST FLAGS (learn from these — do NOT repeat these mistakes):\n"
-            + "\n".join(feedback_lines) + "\n"
-        )
-    except Exception:
-        return ""
 def _recent_user_text(history: list, limit: int = 6) -> str:
     """Return recent user-authored messages combined into one string."""
     if not history:
@@ -936,6 +931,30 @@ Available tools:
    - This is the PREFERRED tool for replacing words or phrases. It automatically fetches the full page,
      performs the replacement, and saves it back — preserving all other content.
    - Use this instead of update_confluence_page when you need to replace specific text.
+9. list_pull_requests_tool
+   - Lists pull requests for a repository.
+   - Args: {"repo": "owner/repo"}
+10. get_base_and_head_sha_tool
+   - Gets base/head SHA info for a PR.
+   - Args: {"repo": "owner/repo", "pr_number": 123}
+11. show_comments_tool
+   - Fetches both general and inline comments in a PR.
+   - Args: {"repo": "owner/repo", "pr_number": 123}
+12. add_file_level_comment_tool
+   - Adds a file-level review comment on a PR file.
+   - Args: {"repo": "owner/repo", "pr_number": 123, "head_sha": "...", "selected_path": "...", "comment_body": "..."}
+13. add_inline_comment_tool
+   - Adds an inline review comment for a specific line range.
+   - Args: {"repo": "owner/repo", "pr_number": 123, "head_sha": "...", "selected_path": "...", "start_line": 1, "end_line": 1, "side": "RIGHT", "comment_body": "..."}
+14. add_comment_tool
+   - Adds a general PR conversation comment.
+   - Args: {"repo": "owner/repo", "pr_number": 123, "comment_text": "..."}
+15. reply_comment_tool
+   - Replies to an existing PR comment (inline or general).
+   - Args: {"repo": "owner/repo", "pr_number": 123, "comment_id": 1, "reply_text": "..."}
+16. cleanup_old_bot_comments_tool
+   - Cleans up older automation comments in PRs.
+   - Args: {"repo": "owner/repo", "pr_number": 123, "keep_latest": 1, "include_inline": false}
 IMPORTANT: When extracting key points, summarizing, or analyzing a FULL page, check the "sections_returned" field
 in the response. If the content seems incomplete or you need to ensure you have EVERYTHING, also call
 get_confluence_page_content to get the full raw content.
@@ -1202,26 +1221,45 @@ ARGS: (provided below in context)
 
 def _call_tool_with_runtime_auth(tool_name: str, args: dict):
     payload = dict(args or {})
-    override_auth = normalize_user_auth(payload.pop("__user_auth", None))
+
+    raw_override_auth = payload.pop("__user_auth", None)
+    if isinstance(raw_override_auth, dict):
+        # Only treat __user_auth as an override when caller provided explicit values.
+        has_explicit_override = any(
+            isinstance(value, str) and bool(value.strip())
+            for k in (
+                "confluence_email",
+                "confluence_api_token",
+                "confluence_base_url",
+                "github_owner",
+                "github_token",
+                "github_base_url",
+            )
+            for value in [raw_override_auth.get(k)]
+        )
+        override_auth = normalize_user_auth(raw_override_auth) if has_explicit_override else {}
+    else:
+        override_auth = {}
+
     runtime_auth = override_auth or get_active_user_auth()
-    
+
     # Extract base URLs if provided
     github_base_url = payload.pop("__github_base_url", None)
     confluence_base_url = payload.pop("__confluence_base_url", None)
-    
+
     # Add base URLs to runtime_auth for set_runtime_auth call
     if github_base_url:
         runtime_auth = runtime_auth or {}
         if not isinstance(runtime_auth, dict):
             runtime_auth = {}
         runtime_auth["github_base_url"] = github_base_url
-    
+
     if confluence_base_url:
         runtime_auth = runtime_auth or {}
         if not isinstance(runtime_auth, dict):
             runtime_auth = {}
         runtime_auth["confluence_base_url"] = confluence_base_url
-    
+
     return mcp_client.call_tool(tool_name, payload, runtime_auth=runtime_auth)
 
 
@@ -1234,6 +1272,16 @@ TOOL_REGISTRY = {
     "add_comment_tool": lambda args: _call_tool_with_runtime_auth("add_comment_tool", args),
     "get_files_in_pr_tool": lambda args: _call_tool_with_runtime_auth("get_files_in_pr_tool", args),
     "file_with_line_no_and_diff_tool": lambda args: _call_tool_with_runtime_auth("file_with_line_no_and_diff_tool", args),
+    "get_base_and_head_sha_tool": lambda args: _call_tool_with_runtime_auth("get_base_and_head_sha_tool", args),
+    "get_file_content_at_ref_tool": lambda args: _call_tool_with_runtime_auth("get_file_content_at_ref_tool", args),
+    "list_repositories_tool": lambda args: _call_tool_with_runtime_auth("list_repositories_tool", args),
+    "list_pull_requests_tool": lambda args: _call_tool_with_runtime_auth("list_pull_requests_tool", args),
+    "add_file_level_comment_tool": lambda args: _call_tool_with_runtime_auth("add_file_level_comment_tool", args),
+    "add_inline_comment_tool": lambda args: _call_tool_with_runtime_auth("add_inline_comment_tool", args),
+    "show_comments_tool": lambda args: _call_tool_with_runtime_auth("show_comments_tool", args),
+    "reply_comment_tool": lambda args: _call_tool_with_runtime_auth("reply_comment_tool", args),
+    "cleanup_old_bot_comments_tool": lambda args: _call_tool_with_runtime_auth("cleanup_old_bot_comments_tool", args),
+    "summarize_pr_and_confluence_tool": lambda args: _call_tool_with_runtime_auth("summarize_pr_and_confluence_tool", args),
     "get_confluence_page_content": lambda args: _call_tool_with_runtime_auth("get_confluence_page_content", args),
     "update_confluence_page": lambda args: _call_tool_with_runtime_auth("update_confluence_page", args),
     "find_and_replace_in_confluence_page": lambda args: _call_tool_with_runtime_auth("find_and_replace_in_confluence_page", args),
@@ -1313,13 +1361,10 @@ def _build_agent_prompt(
             "If the task is NOT fully done, continue with more tool calls. "
             "Only write FINAL_ANSWER when everything is complete."
         )
-    # Load user feedback so the AI can learn from past false positives
-    feedback_context = _load_recent_feedback()
     return (
         system_prompt + "\n\n"
         + link_context
         + history_context
-        + feedback_context
         + scratchpad_text
         + f"\nUser request: {user_msg}\n"
         + verification_reminder

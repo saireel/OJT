@@ -193,7 +193,7 @@
             <p>Run fast, structured reviews for GitHub pull requests and Confluence pages, then publish actionable comments with less manual effort.</p>
             <div class="hero-actions">
                 <a class="btn primary" href="/">Launch MunnAI</a>
-                <a class="btn secondary" href="/">Back to Workspace</a>
+                <button class="btn secondary" id="guide-back-to-workspace" type="button">Back to Workspace</button>
             </div>
         </section>
 
@@ -286,5 +286,19 @@ Fix: Rename getUser() to getUser (already correct)
             </article>
         </section>
     </main>
+
+    <script>
+      (function () {
+        var backBtn = document.getElementById('guide-back-to-workspace');
+        if (!backBtn) return;
+        backBtn.addEventListener('click', function () {
+          if (window.history.length > 1) {
+            window.history.back();
+            return;
+          }
+          window.location.href = '/';
+        });
+      })();
+    </script>
 </body>
 </html>

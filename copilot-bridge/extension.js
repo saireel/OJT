@@ -137,7 +137,7 @@ async function sendWithModel(model, messages, profile, startedAt) {
 
     const latency = Date.now() - startedAt;
 
-    // 📊 track performance
+    // track performance
     const stat = modelStats.get(name) || { success: 0, avgLatency: latency };
     stat.success += 1;
     stat.avgLatency = (stat.avgLatency + latency) / 2;
@@ -173,7 +173,7 @@ async function handlePrompt(promptText) {
     } catch (err) {
         console.warn("Primary model failed:", err.message);
 
-        // 🔥 Detect quota → switch mode permanently
+        // Detect quota → switch mode permanently
         if (err.message?.toLowerCase().includes("quota")) {
             preferFreeModels = true;
         }
@@ -186,7 +186,7 @@ async function handlePrompt(promptText) {
             candidates = allModels.filter(isLikelyFreeModel);
         }
 
-        // 🧠 sort by learned latency
+        // sort by learned latency
         candidates.sort((a, b) => {
             const statA = modelStats.get(a.name) || { avgLatency: Infinity };
             const statB = modelStats.get(b.name) || { avgLatency: Infinity };

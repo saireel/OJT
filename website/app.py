@@ -1,8 +1,28 @@
+import sys
 # app.py
 # Thin Flask entrypoint: routes only. Core logic lives in app_logic.py.
 import atexit
+import os
 import queue
+import requests
+from datetime import datetime
+from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+
+
+def _configure_stdio_utf8() -> None:
+    """Avoid Windows cp1252/charmap crashes when logs include emoji or other Unicode."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
+
+
+_configure_stdio_utf8()
 
 try:
     from . import app_logic as _logic
@@ -54,8 +74,84 @@ def _resolve_confluence_checklist_page_id(checklist):
 
 
 set_active_user_auth = _logic.set_active_user_auth
+
+
+def _normalize_confluence_base_url(raw_url: str | None) -> str:
+    """Normalize user/link-provided Confluence base URL into a stable API root."""
+    candidate = (raw_url or '').strip().rstrip('/')
+    if not candidate:
+        return ''
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return candidate
+    if not parsed.scheme or not parsed.netloc:
+        return candidate
+
+    host = parsed.netloc
+    host_l = host.lower()
+    path_l = (parsed.path or '').lower()
+
+    # Atlassian Cloud endpoints are always rooted under /wiki.
+    if host_l.endswith('atlassian.net'):
+        return f"{parsed.scheme}://{host}/wiki"
+
+    # If we received a deep wiki URL, collapse it to the wiki root.
+    if '/wiki' in path_l:
+        return f"{parsed.scheme}://{host}/wiki"
+
+    return f"{parsed.scheme}://{host}"
+
+
+def _extract_base_urls_from_text(text: str) -> tuple[str | None, str | None]:
+    github_base = None
+    confluence_base = None
+    if not text:
+        return github_base, confluence_base
+
+    for raw in re.findall(r'https?://[^\s"\'<>]+', text):
+        candidate = raw.rstrip(').,;')
+        try:
+            parsed = urlparse(candidate)
+        except Exception:
+            continue
+        if not parsed.scheme or not parsed.netloc:
+            continue
+
+        host = parsed.netloc.lower()
+        path = (parsed.path or "").lower()
+
+        if '/pull/' in path and not github_base:
+            if host.endswith('github.com'):
+                github_base = 'https://api.github.com'
+            else:
+                github_base = f"{parsed.scheme}://{parsed.netloc}/api/v3"
+
+        if ('/wiki/' in path or '/pages/' in path or 'pageid=' in (parsed.query or '').lower()) and not confluence_base:
+            confluence_base = _normalize_confluence_base_url(candidate)
+
+    return github_base, confluence_base
+
+
+def _augment_user_auth_with_detected_base_urls(user_auth: dict, user_msg: str = '', history: list | None = None) -> dict:
+    auth = dict(user_auth or {})
+    existing_conf_base = _normalize_confluence_base_url(auth.get('confluence_base_url'))
+    if existing_conf_base:
+        auth['confluence_base_url'] = existing_conf_base
+    hist_text = ''
+    for entry in (history or []):
+        if isinstance(entry, dict):
+            hist_text += '\n' + str(entry.get('text', '') or '')
+    gh_base, conf_base = _extract_base_urls_from_text((user_msg or '') + hist_text)
+    if gh_base and not auth.get('github_base_url'):
+        auth['github_base_url'] = gh_base
+    # Prefer a base URL detected from the current link to avoid stale saved values.
+    if conf_base:
+        auth['confluence_base_url'] = conf_base
+    return auth
+
+
 clear_active_user_auth = _logic.clear_active_user_auth
-FEEDBACK_FILE = _logic.FEEDBACK_FILE
 _build_checklist_from_panel = _logic._build_checklist_from_panel
 _get_cached_pr_checklist = _logic._get_cached_pr_checklist
 _get_cached_chat_link_metadata = _logic._get_cached_chat_link_metadata
@@ -135,7 +231,8 @@ def _get_cached_pr_files(repo_full: str, pr_num: int, user_auth: dict, github_ba
 def index():
     # Renders the main web page (index.html)
     """Renders and returns the main index.html page."""
-    return render_template("index.html")
+    welcome_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return render_template("index.html", welcome_timestamp=welcome_timestamp)
 
 
 @app.route("/quick-user-guide")
@@ -151,6 +248,7 @@ def chat():
     user_msg = data.get("prompt", "").strip()
     history = data.get("history", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
+    user_auth = _augment_user_auth_with_detected_base_urls(user_auth, user_msg, history)
     review_type = (data.get("review_type") or "").strip()
     doc_type = (data.get("doc_type") or "").strip()
     checklist = data.get("checklist", [])
@@ -246,6 +344,7 @@ def chat_stream():
     user_msg = data.get("prompt", "").strip()
     history = data.get("history", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
+    user_auth = _augment_user_auth_with_detected_base_urls(user_auth, user_msg, history)
     review_type = (data.get("review_type") or "").strip()
     doc_type = (data.get("doc_type") or "").strip()
     checklist = data.get("checklist", [])
@@ -346,30 +445,6 @@ def chat_stream():
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
 
-# --- Feedback API Endpoint ---
-# Lets users report false positives (e.g. a term wrongly flagged as context noise).
-# The feedback is stored in a JSON file and loaded into the AI's context on future requests.
-@app.route("/api/feedback", methods=["POST"])
-def submit_feedback():
-    """POST /api/feedback - records user feedback about a flagged term to the feedback log file."""
-    data = request.get_json(silent=True) or {}
-    term = data.get("term", "").strip()
-    sentence = data.get("sentence", "").strip()
-    feedback = data.get("feedback", "").strip()  # e.g. "not_noise", "valid_term", "false_positive"
-    if not term or not feedback:
-        return jsonify({"error": "Both 'term' and 'feedback' are required."}), 400
-    entry = {
-        "term": term,
-        "sentence": sentence,
-        "feedback": feedback,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    try:
-        with open(FEEDBACK_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        return jsonify({"error": f"Could not save feedback: {e}"}), 500
-    return jsonify({"status": "ok", "message": f"Feedback recorded for term '{term}'."})
 
 # --- PR Review Panel API ---
 @app.route("/api/pr-checklist", methods=["GET"])
@@ -383,24 +458,157 @@ def get_pr_checklist():
         ]
     })
 
+@app.route("/api/test-connections", methods=["POST"])
+def test_connections():
+    """POST /api/test-connections - validates GitHub and Confluence credentials."""
+    data = request.get_json(silent=True) or {}
+    user_auth = normalize_user_auth(data.get("user_auth", {}))
+
+    results = {
+        "github": {"state": "unknown", "message": "Not tested"},
+        "confluence": {"state": "unknown", "message": "Not tested"},
+    }
+
+    # GitHub test
+    gh_owner = (user_auth.get("github_owner") or "").strip()
+    gh_token = (user_auth.get("github_token") or "").strip()
+    gh_base = (user_auth.get("github_base_url") or "https://api.github.com").strip().rstrip("/")
+    if not gh_owner or not gh_token:
+        results["github"] = {
+            "state": "missing",
+            "message": "GitHub owner/token is missing. PR parsing and review posting will fail.",
+        }
+    else:
+        try:
+            gh_resp = requests.get(
+                f"{gh_base}/user",
+                headers={
+                    "Authorization": f"token {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "MunnAI-Connection-Test",
+                },
+                timeout=15,
+            )
+            if gh_resp.ok:
+                login = ""
+                try:
+                    login = (gh_resp.json() or {}).get("login") or ""
+                except Exception:
+                    login = ""
+                msg = "GitHub connection OK"
+                if login:
+                    msg += f" (authenticated as {login})"
+                results["github"] = {"state": "valid", "message": msg}
+            else:
+                body = (gh_resp.text or "").strip().replace("\n", " ")[:220]
+                results["github"] = {
+                    "state": "invalid",
+                    "message": f"GitHub auth failed ({gh_resp.status_code}). {body or 'Check token scopes and owner.'}",
+                }
+        except Exception as exc:
+            results["github"] = {
+                "state": "invalid",
+                "message": f"GitHub connection error: {exc}",
+            }
+
+    # Confluence test
+    conf_email = (user_auth.get("confluence_email") or "").strip()
+    conf_token = (user_auth.get("confluence_api_token") or "").strip()
+    conf_base = _normalize_confluence_base_url(user_auth.get("confluence_base_url"))
+    if not conf_email or not conf_token:
+        results["confluence"] = {
+            "state": "missing",
+            "message": "Confluence email/token is missing. Page fetch and comment actions will fail.",
+        }
+    elif not conf_base:
+        results["confluence"] = {
+            "state": "missing",
+            "message": "Confluence base URL is missing. Set it (for example https://your-domain.atlassian.net/wiki).",
+        }
+    else:
+        try:
+            conf_resp = requests.get(
+                f"{conf_base}/rest/api/space",
+                params={"limit": 1},
+                auth=(conf_email, conf_token),
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+            if conf_resp.ok:
+                results["confluence"] = {"state": "valid", "message": "Confluence connection OK"}
+            else:
+                body = (conf_resp.text or "").strip().replace("\n", " ")[:220]
+                results["confluence"] = {
+                    "state": "invalid",
+                    "message": f"Confluence auth failed ({conf_resp.status_code}). {body or 'Check email/token/base URL.'}",
+                }
+        except Exception as exc:
+            results["confluence"] = {
+                "state": "invalid",
+                "message": f"Confluence connection error: {exc}",
+            }
+
+    return jsonify({"success": True, "results": results})
+
+
 @app.route("/api/parse-pr", methods=["POST"])
 def parse_pr():
-    """POST /api/parse-pr - parses a GitHub PR URL."""
+    """POST /api/parse-pr - parses a GitHub PR URL or Confluence page link/ID."""
     data = request.get_json(silent=True) or {}
     url = data.get("url", "").strip()
-    
-    match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
-    if not match:
-        return jsonify({"error": "Invalid PR URL format"}), 400
-    
-    owner, repo, pr_number = match.groups()
+
+    if not url:
+        return jsonify({"error": "Please provide a link or identifier to parse."}), 400
+
+    gh_match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", url, re.IGNORECASE)
+    if gh_match:
+        owner, repo, pr_number = gh_match.groups()
+        return jsonify({
+            "success": True,
+            "kind": "github_pr",
+            "owner": owner,
+            "repo": repo,
+            "pr_number": int(pr_number),
+            "url": f"https://github.com/{owner}/{repo}/pull/{pr_number}",
+        })
+
+    short_match = re.match(r"^([^\s/#]+)/([^\s/#]+)#(\d+)$", url)
+    if short_match:
+        owner, repo, pr_number = short_match.groups()
+        return jsonify({
+            "success": True,
+            "kind": "github_pr",
+            "owner": owner,
+            "repo": repo,
+            "pr_number": int(pr_number),
+            "url": f"https://github.com/{owner}/{repo}/pull/{pr_number}",
+        })
+
+    conf_match = re.search(r"(?:/pages/|pageId=)(\d+)", url, re.IGNORECASE)
+    if conf_match:
+        page_id = conf_match.group(1)
+        return jsonify({
+            "success": True,
+            "kind": "confluence_page",
+            "page_id": page_id,
+            "url": url,
+        })
+
+    if re.match(r"^\d+$", url):
+        return jsonify({
+            "success": True,
+            "kind": "confluence_page",
+            "page_id": url,
+            "url": url,
+        })
+
     return jsonify({
-        "success": True,
-        "owner": owner,
-        "repo": repo,
-        "pr_number": int(pr_number),
-        "url": url
-    })
+        "error": (
+            "Invalid format. Supported examples: "
+            "https://github.com/owner/repo/pull/123, owner/repo#123, "
+            "Confluence URLs with /pages/<id> or ?pageId=<id>, or a numeric page ID."
+        )
+    }), 400
 
 
 @app.route("/api/review-stream", methods=["POST"])
@@ -411,6 +619,9 @@ def review_stream():
     panel_checklist = data.get("checklist", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
     github_base_url = data.get("github_base_url")  # Extracted from the link by frontend
+    if not github_base_url:
+        gh_detected, _ = _extract_base_urls_from_text(user_msg)
+        github_base_url = gh_detected or user_auth.get("github_base_url")
 
     if not user_msg:
         return jsonify({"error": "Empty prompt"}), 400
@@ -584,7 +795,7 @@ def review_stream():
         reused_inflight = False
         waited_s = 0.0
         result = payload
-        if isinstance(payload, dict) and "result" in payload:
+        if isinstance(payload,  dict) and "result" in payload:
             result = payload.get("result")
             reused_inflight = bool(payload.get("reused_inflight", False))
             try:
@@ -650,7 +861,10 @@ def confluence_review_stream():
     outputs = data.get("outputs", [])
     user_auth = normalize_user_auth(data.get("user_auth", {}))
     confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist)
-    confluence_base_url = data.get("confluence_base_url")  # Extracted from the link by frontend
+    confluence_base_url = _normalize_confluence_base_url(data.get("confluence_base_url"))  # Extracted from link/frontend input
+    if not confluence_base_url:
+        _, conf_detected = _extract_base_urls_from_text(page_input)
+        confluence_base_url = conf_detected or _normalize_confluence_base_url(user_auth.get("confluence_base_url"))
 
     if not page_id and not page_input:
         return jsonify({"error": "No page ID or URL provided"}), 400
@@ -858,11 +1072,12 @@ def confluence_review_stream():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
         direct_passthrough=False,
-    )
+    )   
 
 # --- Shutdown Handler ---
 atexit.register(lambda: mcp_client.shutdown())
 
 # --- Main Entry Point ---
 if __name__ == "__main__":
-    app.run(debug=True, port=5000, threaded=True)
+    app_port = int(os.getenv("PORT", "5000"))
+    app.run(host="127.0.0.1", port=app_port, debug=False, use_reloader=False, threaded=True)

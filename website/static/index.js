@@ -1,6 +1,7 @@
 const chat = document.getElementById("chat");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
+const stop = document.getElementById("stop");
 const requestHint = document.getElementById("request-hint");
 const sidebar = document.querySelector(".sidebar");
 const prReviewPanel = document.getElementById("pr-review-panel");
@@ -49,12 +50,20 @@ if (prPanelModal) {
 }
 const welcomeTyping = document.getElementById("welcome-typing");
 const welcomeCursor = document.getElementById("welcome-cursor");
+const welcomeMsgTime = document.getElementById("welcome-msg-time");
+
+function formatWelcomeTimestamp() {
+    return currentChatTimestamp();
+}
 
 function typeWelcomeMessage() {
     if (!welcomeTyping) return;
     const message = "Hi! I am MunnAI, how may I help you today?";
     let index = 0;
     welcomeTyping.textContent = "";
+    if (welcomeMsgTime) {
+        welcomeMsgTime.textContent = "";
+    }
 
     function step() {
         if (index < message.length) {
@@ -66,6 +75,9 @@ function typeWelcomeMessage() {
         if (welcomeCursor) {
             welcomeCursor.style.display = "none";
         }
+        if (welcomeMsgTime) {
+            welcomeMsgTime.textContent = formatWelcomeTimestamp();
+        }
     }
 
     step();
@@ -74,6 +86,9 @@ function typeWelcomeMessage() {
 typeWelcomeMessage();
 
 const USER_AUTH_STORAGE_KEY = "munnai_user_auth";
+const USER_AUTH_HISTORY_STORAGE_KEY = "munnai_user_auth_history";
+const USER_AUTH_HISTORY_LIMIT = 8;
+const USER_CONNECTION_STATUS_KEY = "munnai_connection_status_v1";
 const ONBOARDING_SEEN_KEY = "munnai_onboarding_seen_v1";
 
 
@@ -82,9 +97,15 @@ function normalizeUserAuth(raw) {
     const normalized = {
         confluence_email: (raw.confluence_email || "").trim(),
         confluence_api_token: (raw.confluence_api_token || "").trim(),
+        confluence_base_url: (raw.confluence_base_url || "").trim().replace(/\/$/, ""),
         github_owner: (raw.github_owner || "").trim(),
-        github_token: (raw.github_token || "").trim()
+        github_token: (raw.github_token || "").trim(),
+        github_base_url: (raw.github_base_url || "").trim().replace(/\/$/, "")
     };
+
+    if (!normalized.github_base_url) {
+        normalized.github_base_url = "https://api.github.com";
+    }
 
     Object.keys(normalized).forEach(function(key) {
         if (!normalized[key]) delete normalized[key];
@@ -113,6 +134,67 @@ function saveUserAuth(auth) {
     return clean;
 }
 
+function loadAuthHistory() {
+    try {
+        var raw = localStorage.getItem(USER_AUTH_HISTORY_STORAGE_KEY);
+        if (!raw) return [];
+        var parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .map(function(entry) {
+                if (!entry || typeof entry !== "object") return null;
+                return {
+                    id: String(entry.id || ""),
+                    saved_at: String(entry.saved_at || ""),
+                    auth: normalizeUserAuth(entry.auth || {})
+                };
+            })
+            .filter(function(entry) {
+                return entry && entry.id && Object.keys(entry.auth || {}).length;
+            });
+    } catch (err) {
+        return [];
+    }
+}
+
+function saveAuthHistory(history) {
+    if (!Array.isArray(history) || !history.length) {
+        localStorage.removeItem(USER_AUTH_HISTORY_STORAGE_KEY);
+        return;
+    }
+    localStorage.setItem(USER_AUTH_HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, USER_AUTH_HISTORY_LIMIT)));
+}
+
+function addAuthHistoryRecord(auth) {
+    var clean = normalizeUserAuth(auth);
+    if (!Object.keys(clean).length) return;
+
+    var history = loadAuthHistory();
+    var serialized = JSON.stringify(clean);
+    history = history.filter(function(entry) {
+        return JSON.stringify(normalizeUserAuth(entry.auth || {})) !== serialized;
+    });
+
+    history.unshift({
+        id: String(Date.now()),
+        saved_at: new Date().toISOString(),
+        auth: clean
+    });
+
+    saveAuthHistory(history);
+}
+
+function formatAuthHistoryLabel(entry) {
+    var dt = entry && entry.saved_at ? new Date(entry.saved_at) : null;
+    var when = dt && !isNaN(dt.getTime())
+        ? dt.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+        : "Unknown time";
+    var auth = (entry && entry.auth) || {};
+    var owner = auth.github_owner || "no-owner";
+    var conf = auth.confluence_email || "no-email";
+    return when + " | GH: " + owner + " | Conf: " + conf;
+}
+
 var quickReviewMode = "combined";
 
 function getReviewPanelTitle(mode) {
@@ -130,11 +212,54 @@ function syncQuickReviewCardSelection(mode) {
     });
 }
 
+function syncConfluenceChecklistVisibility(mode) {
+    // Confluence Panel checklists
+    var confOnlyList = document.getElementById("confluence-only-checklist-items");
+    var confCombinedList = document.getElementById("confluence-combined-checklist-items");
+    
+    // PR Panel checklists
+    var prOnlyList = document.getElementById("pr-only-checklist-items");
+    var prCombinedList = document.getElementById("pr-combined-checklist-items");
+    
+    var legacyList = document.getElementById("confluence-checklist-items");
+
+    // Handle Confluence Panel
+    if (confOnlyList && confCombinedList) {
+        if (mode === "confluence") {
+            confOnlyList.style.display = "block";
+            confCombinedList.style.display = "none";
+            console.log("Confluence panel: showing only checklist");
+        } else {
+            // Treat both combined and pr mode as combined checklist in Confluence panel.
+            confOnlyList.style.display = "none";
+            confCombinedList.style.display = "block";
+            console.log("Confluence panel: showing combined checklist");
+        }
+    }
+    
+    // Handle PR Panel
+    if (prOnlyList && prCombinedList) {
+        if (mode === "pr") {
+            prOnlyList.style.display = "block";
+            prCombinedList.style.display = "none";
+        } else {
+            prOnlyList.style.display = "none";
+            prCombinedList.style.display = "block";
+        }
+    }
+
+    if (legacyList) {
+        legacyList.style.display = "block";
+    }
+}
+
+
 function setQuickReviewMode(mode) {
     quickReviewMode = mode || "combined";
     if (confPrLinkGroup) {
         confPrLinkGroup.style.display = quickReviewMode === "combined" ? "" : "none";
     }
+    syncConfluenceChecklistVisibility(quickReviewMode);
     if (confluenceReviewTitle) {
         confluenceReviewTitle.textContent = getReviewPanelTitle(quickReviewMode);
     }
@@ -164,9 +289,9 @@ function closeQuickReviewModal() {
         quickReviewModal.style.display = "none";
     }
 }
-
 function openConfluencePanelForMode(mode) {
     setQuickReviewMode(mode);
+
     if (confPanel) {
         confPanel.style.display = "flex";
         mainChat.style.display = "none";
@@ -175,6 +300,8 @@ function openConfluencePanelForMode(mode) {
     if (prReviewPanel) {
         prReviewPanel.style.display = "none";
     }
+
+    return !!confPanel;
 }
 
 function openPrReviewPanelForMode(mode) {
@@ -310,8 +437,30 @@ setInterval(function() {
     reviewProgress.updateTimer();
 }, 1000);
 
+function getDraftUserAuthFromInputs() {
+    const readValue = function(ids) {
+        const idList = Array.isArray(ids) ? ids : [ids];
+        for (var i = 0; i < idList.length; i += 1) {
+            const el = document.getElementById(idList[i]);
+            if (el && typeof el.value === 'string') {
+                return el.value;
+            }
+        }
+        return '';
+    };
+    const draft = {
+        confluence_email: readValue(['edit-confluence-email']),
+        confluence_api_token: readValue(['edit-confluence-token']),
+        confluence_base_url: readValue(['edit-confluence-base-url']),
+        github_owner: readValue(['edit-github-owner']),
+        github_token: readValue(['edit-github-token']),
+        github_base_url: readValue(['edit-github-base-url'])
+    };
+    return normalizeUserAuth(draft);
+}
+
 function getUserAuthPayload() {
-    return loadUserAuth();
+    return normalizeUserAuth(Object.assign({}, loadUserAuth(), getDraftUserAuthFromInputs()));
 }
 
 function withUserAuthPayload(payload) {
@@ -327,6 +476,54 @@ function maskSecret(value) {
 
 function currentChatTimestamp() {
     return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function isErrorLikeText(text) {
+    var t = String(text || "").trim().toLowerCase();
+    if (!t) return false;
+    return t.startsWith("error") || t.startsWith("review failed") || t.includes("invalid url") || t.includes("not configured") || t.includes("failed:");
+}
+
+function extractErrorMessage(data, fallback) {
+    if (data && typeof data.error === "string" && data.error.trim()) return data.error.trim();
+    if (data && typeof data.response === "string" && isErrorLikeText(data.response)) return data.response.trim();
+    var fb = String(fallback || "").trim();
+    return fb || "Request failed";
+}
+
+function isAuthErrorLikeText(text) {
+    var t = String(text || "").toLowerCase();
+    return t.includes("401") || t.includes("403") || t.includes("unauthorized") || t.includes("forbidden") || t.includes("token expired") || t.includes("expired token") || t.includes("invalid token") || t.includes("invalid credentials") || t.includes("not configured") || t.includes("authentication failed");
+}
+
+function toActionableErrorMessage(text) {
+    var msg = String(text || "").trim();
+    if (!msg) return "Request failed";
+    if (isAuthErrorLikeText(msg) && msg.toLowerCase().indexOf("account setup") === -1) {
+        return msg + "\n\nAction: Open Account Setup, refresh/save credentials, then click Test Connection.";
+    }
+    return msg;
+}
+
+function parseGithubApiBaseUrlFromPrLink(link) {
+    var text = String(link || "").trim();
+    if (!text) return "https://api.github.com";
+    var urlMatch = text.match(/^https?:\/\/([^\/]+)\//i);
+    if (!urlMatch) return "https://api.github.com";
+    var host = urlMatch[1].toLowerCase();
+    if (host === "github.com" || host.endsWith(".github.com")) return "https://api.github.com";
+    var scheme = text.toLowerCase().startsWith("http://") ? "http://" : "https://";
+    return scheme + urlMatch[1] + "/api/v3";
+}
+
+function parseConfluenceBaseUrlFromPageLink(link) {
+    var text = String(link || "").trim();
+    if (!text) return "";
+    var m = text.match(/^(https?:\/\/[^\/]+)(\/wiki)?/i);
+    if (!m) return "";
+    if (m[2]) return m[1] + "/wiki";
+    if (/atlassian\.net/i.test(m[1])) return m[1] + "/wiki";
+    return m[1];
 }
 
 function escapeHtml(text) {
@@ -524,23 +721,26 @@ backToChatBtn.addEventListener("click", function() {
 
 // Parse PR link
 parsePrBtn.addEventListener("click", function() {
-    var link = prLinkInput.value.trim();
-    var match = link.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
-    if (match) {
-        prDisplay.textContent = match[1] + "/" + match[2] + "#" + match[3];
+    var parsed = parseGithubPrLink(prLinkInput.value.trim());
+    if (parsed) {
+        prDisplay.textContent = parsed.owner + "/" + parsed.repo + "#" + parsed.prNum;
         prInfo.style.display = "block";
     } else {
-        alert("Invalid PR link. Use: https://github.com/owner/repo/pull/123");
+        showUiAlert("Invalid PR link. Use: https://github.com/owner/repo/pull/123 or owner/repo#123");
     }
 });
 
 // Select All / Deselect All for checklist
-selectAllBtn.addEventListener("click", function() {
-    checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
-});
-deselectAllBtn.addEventListener("click", function() {
-    checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
-});
+if (selectAllBtn && checklistItems) {
+    selectAllBtn.addEventListener("click", function() {
+        checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
+    });
+}
+if (deselectAllBtn && checklistItems) {
+    deselectAllBtn.addEventListener("click", function() {
+        checklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
+    });
+}
 
 
 // Add expected output item
@@ -570,9 +770,9 @@ if (fastModeToggle) {
 // Start Review - builds prompt and sends to chat
 startReviewBtn.addEventListener("click", function() {
     var prLink = prLinkInput.value.trim();
-    if (!prLink) { alert("Please enter a PR link"); return; }
-    var match = prLink.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/);
-    if (!match) { alert("Invalid PR link format"); return; }
+    if (!prLink) { showUiAlert("Please enter a PR link"); return; }
+    var parsedPr = parseGithubPrLink(prLink);
+    if (!parsedPr) { showUiAlert("Invalid PR link format. Use a URL or owner/repo#123"); return; }
 
     var outputs = [];
     document.querySelectorAll("#output-options .output-item").forEach(function(item) {
@@ -581,17 +781,23 @@ startReviewBtn.addEventListener("click", function() {
         }
     });
 
-    if (outputs.length === 0) { alert("Please select at least one expected output type"); return; }
+    if (outputs.length === 0) { showUiAlert("Please select at least one expected output type"); return; }
 
     var items = checklistItems.querySelectorAll(".check-item");
+    // AFTER — replace with this:
+    var activeChecklist = document.querySelector(
+        '#pr-only-checklist-items:not([style*="display:none"]), #pr-combined-checklist-items:not([style*="display:none"]), #confluence-only-checklist-items:not([style*="display:none"]), #confluence-combined-checklist-items:not([style*="display:none"])'
+    );
     var checklist = [];
-    items.forEach(function(item) {
-        if (item.querySelector("input").checked) {
-            checklist.push(item.querySelector("span").textContent);
-        }
-    });
-
-    var owner = match[1], repo = match[2], prNum = match[3];
+    if (activeChecklist) {
+        activeChecklist.querySelectorAll(".check-item").forEach(function(item) {
+            if (item.querySelector("input").checked) {
+                checklist.push(item.querySelector("span").textContent);
+            }
+        });
+    }
+    var owner = parsedPr.owner, repo = parsedPr.repo, prNum = parsedPr.prNum;
+    var githubBaseUrl = parseGithubApiBaseUrlFromPrLink(prLink);
     var fastMode = false;
     var maxInlineComments = 12;
     var groupSimilarInline = true;
@@ -629,7 +835,7 @@ startReviewBtn.addEventListener("click", function() {
             var res = await fetch("/api/review-stream", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory, checklist: checklist, outputs: outputs, fast_mode: fastMode, max_inline_comments: maxInlineComments, group_similar_inline: groupSimilarInline}))
+                body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory, checklist: checklist, outputs: outputs, fast_mode: fastMode, max_inline_comments: maxInlineComments, group_similar_inline: groupSimilarInline, github_base_url: githubBaseUrl}))
             });
 
             if (!res.ok || !res.body) {
@@ -641,6 +847,19 @@ startReviewBtn.addEventListener("click", function() {
                 });
                 var data2 = await res2.json();
                 var resp = data2.response || data2.error || "No response";
+                var fallbackFailed = !res2.ok || !!data2.error || isErrorLikeText(resp);
+                if (fallbackFailed) {
+                    var fallbackErr = toActionableErrorMessage(extractErrorMessage(data2, resp));
+                    markConnectionStatusFromError(fallbackErr);
+                    reviewProgress.addLog("Error: " + fallbackErr, "error");
+                    reviewProgress.setTitle("Review failed");
+                    reviewProgress.setState("error");
+                    requestHint.textContent = "Review failed";
+                    requestHint.style.color = "#d32f2f";
+                    chatHistory.push({role: "assistant", text: fallbackErr});
+                    createAssistantMessageBubble(fallbackErr);
+                    return;
+                }
                 reviewProgress.addLog("OK " + resp.split("\n")[0], "success");
                 reviewProgress.setTitle("Review complete");
                 reviewProgress.setState("success");
@@ -655,6 +874,8 @@ startReviewBtn.addEventListener("click", function() {
             var decoder = new TextDecoder();
             var buffer = "";
             var finalMessage = "";
+            var sawDoneEvent = false;
+            var sawErrorEvent = false;
 
             while (true) {
                 var chunk = await reader.read();
@@ -674,16 +895,30 @@ startReviewBtn.addEventListener("click", function() {
                             requestHint.textContent = evt.message;
                             requestHint.style.color = "#666";
                         } else if (evt.type === "done") {
-                            finalMessage = evt.message;
-                            reviewProgress.addLog(evt.message, "success");
-                            reviewProgress.setTitle("Review complete");
-                            reviewProgress.setState("success");
-                            reviewProgress.hide();
-                            requestHint.textContent = "Review complete";
-                            requestHint.style.color = "#2e7d32";
+                            finalMessage = evt.message || "";
+                            sawDoneEvent = true;
+                            if (!sawErrorEvent && !isErrorLikeText(finalMessage)) {
+                                reviewProgress.addLog(finalMessage || "Review completed.", "success");
+                                reviewProgress.setTitle("Review complete");
+                                reviewProgress.setState("success");
+                                reviewProgress.hide();
+                                requestHint.textContent = "Review complete";
+                                requestHint.style.color = "#2e7d32";
+                            } else {
+                                finalMessage = toActionableErrorMessage(finalMessage || "Review failed during streaming.");
+                                sawErrorEvent = true;
+                                markConnectionStatusFromError(finalMessage);
+                                reviewProgress.addLog(finalMessage, "error");
+                                reviewProgress.setTitle("Review failed");
+                                reviewProgress.setState("error");
+                                requestHint.textContent = "Review failed";
+                                requestHint.style.color = "#d32f2f";
+                            }
                         } else if (evt.type === "error") {
-                            finalMessage = evt.message;
-                            reviewProgress.addLog(evt.message, "error");
+                            finalMessage = toActionableErrorMessage(evt.message);
+                            sawErrorEvent = true;
+                            markConnectionStatusFromError(finalMessage);
+                            reviewProgress.addLog(finalMessage, "error");
                             reviewProgress.setTitle("Review failed");
                             reviewProgress.setState("error");
                             requestHint.textContent = "Review failed";
@@ -693,7 +928,18 @@ startReviewBtn.addEventListener("click", function() {
                 }
             }
 
-            chatHistory.push({role: "assistant", text: finalMessage || "Review completed"});
+            if (!finalMessage) {
+                finalMessage = "Review failed: No completion payload returned.";
+                reviewProgress.addLog(finalMessage, "error");
+                reviewProgress.setTitle("Review failed");
+                reviewProgress.setState("error");
+                requestHint.textContent = "Review failed";
+                requestHint.style.color = "#d32f2f";
+            }
+            if (sawErrorEvent && !sawDoneEvent) {
+                finalMessage = toActionableErrorMessage(finalMessage);
+            }
+            chatHistory.push({role: "assistant", text: finalMessage});
         } catch (err) {
             reviewProgress.addLog("Retrying with direct review...");
             try {
@@ -704,18 +950,32 @@ startReviewBtn.addEventListener("click", function() {
                 });
                 var data3 = await res3.json();
                 var resp3 = data3.response || data3.error || "No response";
-                reviewProgress.addLog("OK " + resp3.split("\n")[0], "success");
-                reviewProgress.setTitle("Review complete");
-                reviewProgress.setState("success");
-                reviewProgress.hide();
-                chatHistory.push({role: "assistant", text: resp3});
-                requestHint.textContent = "Review complete";
-                requestHint.style.color = "#2e7d32";
+                var resp3Failed = !res3.ok || !!data3.error || isErrorLikeText(resp3);
+                if (resp3Failed) {
+                    var err3 = toActionableErrorMessage(extractErrorMessage(data3, resp3));
+                    markConnectionStatusFromError(err3);
+                    reviewProgress.addLog(err3, "error");
+                    reviewProgress.setTitle("Review failed");
+                    reviewProgress.setState("error");
+                    chatHistory.push({role: "assistant", text: err3});
+                    requestHint.textContent = "Review failed";
+                    requestHint.style.color = "#d32f2f";
+                } else {
+                    reviewProgress.addLog("OK " + resp3.split("\n")[0], "success");
+                    reviewProgress.setTitle("Review complete");
+                    reviewProgress.setState("success");
+                    reviewProgress.hide();
+                    chatHistory.push({role: "assistant", text: resp3});
+                    requestHint.textContent = "Review complete";
+                    requestHint.style.color = "#2e7d32";
+                }
             } catch (err2) {
-                reviewProgress.addLog("Error: " + err2.message, "error");
+                var err2Msg = toActionableErrorMessage(err2.message);
+                markConnectionStatusFromError(err2Msg);
+                reviewProgress.addLog("Error: " + err2Msg, "error");
                 reviewProgress.setTitle("Review failed");
                 reviewProgress.setState("error");
-                requestHint.textContent = "Error: " + err2.message;
+                requestHint.textContent = "Error: " + err2Msg;
                 requestHint.style.color = "#d32f2f";
             }
         }
@@ -724,16 +984,33 @@ startReviewBtn.addEventListener("click", function() {
 
 // --- Original Chat ---
 var chatHistory = [];
+let activeChatRequest = null;
+let chatRequestSeq = 0;
+
+function setStopButtonState(isActive) {
+    if (!stop) return;
+    stop.disabled = !isActive;
+}
 
 send.addEventListener("click", async function() {
     var msg = input.value.trim();
     if (!msg) return;
 
+    if (activeChatRequest && activeChatRequest.controller && !activeChatRequest.controller.signal.aborted) {
+        activeChatRequest.controller.abort();
+    }
+
+    const requestId = ++chatRequestSeq;
+    const requestController = new AbortController();
+    activeChatRequest = { id: requestId, controller: requestController };
+    setStopButtonState(true);
+    const isStaleRequest = function() {
+        return !activeChatRequest || activeChatRequest.id !== requestId;
+    };
+
     input.value = "";
 
-    // --- USER MESSAGE ---
     createUserMessageBubble(msg);
-
     chatHistory.push({role: "user", text: msg});
 
     requestHint.textContent = "Processing...";
@@ -745,18 +1022,26 @@ send.addEventListener("click", async function() {
         chatHistory.push({role: "assistant", text: localFastReply});
         requestHint.textContent = "Ready for next request";
         requestHint.style.color = "#999";
+        if (activeChatRequest && activeChatRequest.id === requestId) {
+            activeChatRequest = null;
+            setStopButtonState(false);
+        }
         return;
     }
 
-    // SHOW TYPING DOTS IMMEDIATELY
     const typingBubble = createTypingBubble();
     let progressBubble = null;
+    const cleanupTransientBubbles = function() {
+        if (progressBubble) progressBubble.remove();
+        removeTypingBubble(typingBubble);
+    };
 
     try {
         var sseRes = await fetch("/api/chat-stream", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
+            body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory})),
+            signal: requestController.signal,
         });
 
         if (!sseRes.ok || !sseRes.body) {
@@ -769,8 +1054,13 @@ send.addEventListener("click", async function() {
         let finalResponse = null;
         let finalDetected = null;
 
-        outer: while (true) {
+        while (true) {
             const { value, done } = await sseReader.read();
+            if (isStaleRequest()) {
+                try { await sseReader.cancel(); } catch (e) {}
+                cleanupTransientBubbles();
+                return;
+            }
             if (done) break;
             sseBuf += sseDec.decode(value, { stream: true });
             const parts = sseBuf.split("\n\n");
@@ -791,71 +1081,118 @@ send.addEventListener("click", async function() {
                     progressBubble.querySelector(".msg-body").textContent = evt.message;
                     requestHint.textContent = evt.message;
                 } else if (evt.type === "done") {
-                    try { const d = JSON.parse(evt.message); finalResponse = d.response || "No response"; finalDetected = d.detected; } catch(e) { finalResponse = evt.message; }
+                    try {
+                        const d = JSON.parse(evt.message);
+                        finalResponse = d.response || "No response";
+                        finalDetected = d.detected;
+                    } catch(e) {
+                        finalResponse = evt.message;
+                    }
                 } else if (evt.type === "error") {
                     finalResponse = evt.message;
-                } else if (evt.type === "heartbeat") {
-                    // keep-alive, ignore
                 }
             }
         }
 
-        if (progressBubble) progressBubble.remove();
-        removeTypingBubble(typingBubble);
+        if (isStaleRequest()) {
+            cleanupTransientBubbles();
+            return;
+        }
+        cleanupTransientBubbles();
 
         var response = finalResponse || "No response";
         var data = { response, detected: finalDetected };
 
         createAssistantMessageBubble(response);
-
         chatHistory.push({role: "assistant", text: response});
 
-        requestHint.textContent = "Ready for next request";
-        requestHint.style.color = "#999";
+        if (isErrorLikeText(response)) {
+            requestHint.textContent = "Review failed";
+            requestHint.style.color = "#d32f2f";
+        } else {
+            requestHint.textContent = "Ready for next request";
+            requestHint.style.color = "#999";
+        }
 
     } catch (err) {
-        // FALLBACK to non-streaming /api/chat
-        if (progressBubble) progressBubble.remove();
-        removeTypingBubble(typingBubble);
+        if (isStaleRequest()) {
+            cleanupTransientBubbles();
+            return;
+        }
+        cleanupTransientBubbles();
+
+        if (err && (err.name === "AbortError" || /abort/i.test(String(err.message || "")))) {
+            requestHint.textContent = "Interrupted by new request";
+            requestHint.style.color = "#999";
+            return;
+        }
+
         const typingBubble2 = createTypingBubble();
         try {
             var res2 = await fetch("/api/chat", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
+                body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory})),
+                signal: requestController.signal,
             });
+            if (isStaleRequest()) {
+                removeTypingBubble(typingBubble2);
+                return;
+            }
             var data2 = await res2.json();
             var response2 = data2.response || data2.error || "No response";
             removeTypingBubble(typingBubble2);
             createAssistantMessageBubble(response2);
             chatHistory.push({role: "assistant", text: response2});
-            requestHint.textContent = "Ready for next request";
-            requestHint.style.color = "#999";
+            if (!res2.ok || data2.error || isErrorLikeText(response2)) {
+                requestHint.textContent = "Review failed";
+                requestHint.style.color = "#d32f2f";
+            } else {
+                requestHint.textContent = "Ready for next request";
+                requestHint.style.color = "#999";
+            }
             return;
         } catch(err2) {
             removeTypingBubble(typingBubble2);
+            if (isStaleRequest()) return;
+            var _err = err2 || err;
+
+            var errorMsg = document.createElement("div");
+            errorMsg.className = "msg bot";
+            errorMsg.innerHTML = `
+                <div class="msg-inner" style="border-color:#d32f2f;color:#d32f2f;">
+                    <div class="msg-time">${currentChatTimestamp()}</div>
+                    <div class="msg-body">Error: ${((_err && _err.message) || "Unknown error").replace(/</g,"&lt;")}</div>
+                </div>
+            `;
+            chat.appendChild(errorMsg);
+
+            requestHint.textContent = "Error occurred";
+            requestHint.style.color = "#d32f2f";
         }
-        // ERROR HANDLING (only if fallback also failed)
-        var _err = err2 || err;
-
-        var errorMsg = document.createElement("div");
-        errorMsg.className = "msg bot";
-        errorMsg.innerHTML = `
-            <div class="msg-inner" style="border-color:#d32f2f;color:#d32f2f;">
-                <div class="msg-time">${currentChatTimestamp()}</div>
-                <div class="msg-body">Error: ${((_err && _err.message) || "Unknown error").replace(/</g,"&lt;")}</div>
-            </div>
-        `;
-        chat.appendChild(errorMsg);
-
-        requestHint.textContent = "Error occurred";
-        requestHint.style.color = "#d32f2f";
+    } finally {
+        if (activeChatRequest && activeChatRequest.id === requestId) {
+            activeChatRequest = null;
+            setStopButtonState(false);
+        }
     }
 });
 
 input.addEventListener("keydown", function(e) {
     if (e.ctrlKey && e.key === "Enter") { send.click(); }
 });
+
+
+if (stop) {
+    stop.addEventListener("click", function() {
+        if (activeChatRequest && activeChatRequest.controller && !activeChatRequest.controller.signal.aborted) {
+            activeChatRequest.controller.abort();
+            requestHint.textContent = "Stopped";
+            requestHint.style.color = "#999";
+        }
+        setStopButtonState(false);
+    });
+}
 
 // --- Confluence Review Panel ---
 var confPanel = document.getElementById("confluence-review-panel");
@@ -888,8 +1225,66 @@ var confParseBtn = document.getElementById("parse-confluence-btn");
 var confInfo = document.getElementById("confluence-info");
 var confDisplay = document.getElementById("confluence-display");
 var confDocType = document.getElementById("confluence-doc-type");
-var confChecklistItems = document.getElementById("confluence-checklist-items");
+function getActiveConfluenceChecklistContainer() {
+    var onlyList = document.getElementById("confluence-only-checklist-items");
+    var combinedList = document.getElementById("confluence-combined-checklist-items");
+    var legacyList = document.getElementById("confluence-checklist-items");
 
+    if (quickReviewMode === "confluence") {
+        return onlyList || legacyList || combinedList;
+    }
+    // For combined or pr mode, always prefer the combined checklist.
+    return combinedList || legacyList || onlyList;
+}
+function getUiAlertHost() {
+    var existing = document.getElementById("ui-alert-host");
+    if (existing) {
+        return existing;
+    }
+
+    var host = document.createElement("div");
+    host.id = "ui-alert-host";
+    host.className = "ui-alert-host";
+    document.body.appendChild(host);
+    return host;
+}
+
+function renderUiAlert(message) {
+    var host = getUiAlertHost();
+    var alertNode = document.createElement("div");
+    alertNode.className = "ui-alert-toast";
+    alertNode.setAttribute("role", "alert");
+    alertNode.textContent = String(message || "Something went wrong.");
+
+    host.appendChild(alertNode);
+
+    requestAnimationFrame(function() {
+        alertNode.classList.add("show");
+    });
+
+    window.setTimeout(function() {
+        alertNode.classList.remove("show");
+        window.setTimeout(function() {
+            if (alertNode.parentNode) {
+                alertNode.parentNode.removeChild(alertNode);
+            }
+        }, 220);
+    }, 4200);
+}
+
+function showUiAlert(message) {
+    var text = String(message || "Something went wrong.");
+    renderUiAlert(text);
+
+    if (requestHint) {
+        requestHint.textContent = text;
+        requestHint.style.color = "#d32f2f";
+    }
+
+    if (typeof createAssistantMessageBubble === "function") {
+        createAssistantMessageBubble(text);
+    }
+}
 confReviewBtn.addEventListener("click", function() {
     openQuickReviewModal(quickReviewMode || "combined");
 });
@@ -940,12 +1335,20 @@ if (quickReviewContinueBtn) {
     quickReviewContinueBtn.addEventListener("click", function() {
         var selected = document.querySelector('input[name="quick-review-mode"]:checked');
         var mode = selected ? selected.value : "combined";
-        closeQuickReviewModal();
+
         if (mode === "pr") {
             openPrReviewPanelForMode(mode);
+            closeQuickReviewModal();
             return;
         }
-        openConfluencePanelForMode(mode);
+
+        var opened = openConfluencePanelForMode(mode);
+        if (opened) {
+            closeQuickReviewModal();
+            return;
+        }
+
+        showUiAlert("Could not open the Confluence review panel. Reload the page and try again.");
     });
 }
 setQuickReviewMode("combined");
@@ -957,32 +1360,65 @@ if (prReviewTitle) {
 }
 
 
-// Parse Confluence link
+function parseConfluencePageLink(link) {
+    var text = String(link || "").trim();
+    if (!text) return null;
+    var pageMatch = text.match(/(?:\/pages\/|pageId=)(\d+)/i);
+    if (pageMatch) {
+        return {
+            pageId: pageMatch[1],
+            source: text
+        };
+    }
+    if (/^\d+$/.test(text)) {
+        return {
+            pageId: text,
+            source: text
+        };
+    }
+    return null;
+}
+
+// Parse Confluence link (and PR link when combined mode is selected)
 confParseBtn.addEventListener("click", function() {
-    var link = confLinkInput.value.trim();
-    // Try URL pattern: .../pages/12345/... or .../pages/12345
-    var match = link.match(/pages\/([0-9]+)/);
-    if (match) {
-        confDisplay.textContent = "Page ID: " + match[1];
-        confInfo.style.display = "block";
+    var confParsed = parseConfluencePageLink(confLinkInput.value);
+    if (!confParsed) {
+        showUiAlert("Could not parse Confluence page. Use a URL containing /pages/<id> or ?pageId=<id>, or enter a numeric page ID.");
         return;
     }
-    // Try raw numeric page ID
-    if (/^\d+$/.test(link)) {
-        confDisplay.textContent = "Page ID: " + link;
-        confInfo.style.display = "block";
-        return;
+
+    var parseMessage = "Page ID: " + confParsed.pageId;
+    var mode = quickReviewMode || "combined";
+
+    if (mode === "combined") {
+        var prParsed = parseGithubPrLink(confPrLinkInput ? confPrLinkInput.value : "");
+        if (!prParsed) {
+            showUiAlert("Combined mode requires a valid GitHub PR URL or owner/repo#123.");
+            return;
+        }
+        parseMessage += " | PR: " + prParsed.owner + "/" + prParsed.repo + "#" + prParsed.prNum;
     }
-    alert("Could not parse Confluence page. Use a URL with /pages/12345 or enter a numeric page ID.");
+
+    confDisplay.textContent = parseMessage;
+    confInfo.style.display = "block";
 });
 
-// Confluence checklist controls
-document.getElementById("confluence-select-all-btn").addEventListener("click", function() {
-    confChecklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = true; });
-});
-document.getElementById("confluence-deselect-all-btn").addEventListener("click", function() {
-    confChecklistItems.querySelectorAll("input[type=checkbox]").forEach(function(cb) { cb.checked = false; });
-});
+const confluenceSelectAllBtn = document.getElementById('confluence-select-all-btn');
+if (confluenceSelectAllBtn) {
+    confluenceSelectAllBtn.addEventListener('click', () => {
+        const activeList = getActiveConfluenceChecklistContainer();
+        if (activeList) activeList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+    });
+}
+
+const confluenceDeselectAllBtn = document.getElementById('confluence-deselect-all-btn');
+if (confluenceDeselectAllBtn) {
+    confluenceDeselectAllBtn.addEventListener('click', () => {
+        const activeList = getActiveConfluenceChecklistContainer();
+        if (activeList) activeList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+    });
+}
+
 // Add confluence expected output item
 document.getElementById("confluence-add-output-btn").addEventListener("click", function() {
     var inp = document.getElementById("confluence-add-output-input");
@@ -1016,28 +1452,28 @@ function parseGithubPrLink(link) {
 // Start Confluence Review
 confStartBtn.addEventListener("click", function() {
     var link = confLinkInput.value.trim();
-    if (!link) { alert("Please enter a Confluence page URL or ID"); return; }
+    var confluenceBaseUrl = parseConfluenceBaseUrlFromPageLink(link);
+    if (!link) { showUiAlert("Please enter a Confluence page URL or ID"); return; }
 
-    var pageId = null;
-    var match = link.match(/pages\/([0-9]+)/);
-    if (match) {
-        pageId = match[1];
-    } else if (/^\d+$/.test(link)) {
-        pageId = link;
-    } else {
-        alert("Could not parse page ID from input.");
+    var parsedPage = parseConfluencePageLink(link);
+    if (!parsedPage) {
+        showUiAlert("Could not parse page ID from input. Use /pages/<id>, ?pageId=<id>, or a numeric page ID.");
         return;
     }
+    var pageId = parsedPage.pageId;
 
     var docType = confDocType.value;
     var checklist = [];
-    confChecklistItems.querySelectorAll(".check-item").forEach(function(item) {
-        if (item.querySelector("input").checked) {
-            checklist.push(item.querySelector("span").textContent);
-        }
-    });
+    var activeConfluenceChecklist = getActiveConfluenceChecklistContainer();
+    if (activeConfluenceChecklist) {
+        activeConfluenceChecklist.querySelectorAll(".check-item").forEach(function(item) {
+            if (item.querySelector("input").checked) {
+                checklist.push(item.querySelector("span").textContent);
+            }
+        });
+    }
 
-    if (checklist.length === 0) { alert("Please select at least one checklist item"); return; }
+    if (checklist.length === 0) { showUiAlert("Please select at least one checklist item"); return; }
 
     var outputs = [];
     document.querySelectorAll("#confluence-output-options .output-item").forEach(function(item) {
@@ -1045,15 +1481,15 @@ confStartBtn.addEventListener("click", function() {
             outputs.push(item.querySelector("span").textContent.trim());
         }
     });
-    if (outputs.length === 0) { alert("Please select at least one expected output type"); return; }
+    if (outputs.length === 0) { showUiAlert("Please select at least one expected output type"); return; }
 
     var currentMode = quickReviewMode || "combined";
     var prLink = confPrLinkInput ? confPrLinkInput.value.trim() : "";
     var prMatch = null;
     if (currentMode === "combined") {
-        if (!prLink) { alert("Please enter a GitHub PR URL or ID"); return; }
+        if (!prLink) { showUiAlert("Please enter a GitHub PR URL or ID"); return; }
         prMatch = parseGithubPrLink(prLink);
-        if (!prMatch) { alert("Could not parse GitHub PR link. Use a GitHub PR URL or owner/repo#123."); return; }
+        if (!prMatch) { showUiAlert("Could not parse GitHub PR link. Use a GitHub PR URL or owner/repo#123."); return; }
     }
 
     var msg = "Review this Confluence page: " + link;
@@ -1094,11 +1530,25 @@ confStartBtn.addEventListener("click", function() {
                         doc_type: docType,
                         checklist: checklist,
                         outputs: outputs,
-                        confluence_checklist_page_id: pageId
+                        confluence_checklist_page_id: pageId,
+                        confluence_base_url: confluenceBaseUrl
                     }))
                 });
                 var combinedData = await combinedRes.json();
                 var combinedResp = combinedData.response || combinedData.error || "No response";
+                var combinedFailed = !combinedRes.ok || !!combinedData.error || isErrorLikeText(combinedResp);
+                if (combinedFailed) {
+                    var combinedErr = toActionableErrorMessage(extractErrorMessage(combinedData, combinedResp));
+                    markConnectionStatusFromError(combinedErr);
+                    reviewProgress.addLog("Error: " + combinedErr, "error");
+                    reviewProgress.setTitle("Review failed");
+                    reviewProgress.setState("error");
+                    requestHint.textContent = "Review failed";
+                    requestHint.style.color = "#d32f2f";
+                    chatHistory.push({role: "assistant", text: combinedErr});
+                    createAssistantMessageBubble(combinedErr);
+                    return;
+                }
                 reviewProgress.addLog("OK " + combinedResp.split("\n")[0], "success");
                 reviewProgress.setTitle("Review complete");
                 reviewProgress.setState("success");
@@ -1119,7 +1569,8 @@ confStartBtn.addEventListener("click", function() {
                     checklist: checklist,
                     outputs: outputs,
                     prompt: msg,
-                    history: chatHistory
+                    history: chatHistory,
+                    confluence_base_url: confluenceBaseUrl
                 }))
             });
 
@@ -1132,6 +1583,19 @@ confStartBtn.addEventListener("click", function() {
                 });
                 var data2 = await res2.json();
                 var resp = data2.response || data2.error || "No response";
+                var fallbackFailed = !res2.ok || !!data2.error || isErrorLikeText(resp);
+                if (fallbackFailed) {
+                    var fallbackErr = toActionableErrorMessage(extractErrorMessage(data2, resp));
+                    markConnectionStatusFromError(fallbackErr);
+                    reviewProgress.addLog("Error: " + fallbackErr, "error");
+                    reviewProgress.setTitle("Review failed");
+                    reviewProgress.setState("error");
+                    requestHint.textContent = "Review failed";
+                    requestHint.style.color = "#d32f2f";
+                    chatHistory.push({role: "assistant", text: fallbackErr});
+                    createAssistantMessageBubble(fallbackErr);
+                    return;
+                }
                 reviewProgress.addLog("OK " + resp.split("\n")[0], "success");
                 reviewProgress.setTitle("Review complete");
                 reviewProgress.setState("success");
@@ -1223,22 +1687,31 @@ confStartBtn.addEventListener("click", function() {
             }
 
             if (!assistantText.trim()) {
-                assistantText = "Review completed.";
+                assistantText = "Review failed: No response returned from review stream.";
             }
 
             const botBubble = createStreamingBubble();
             streamText(botBubble.textEl, botBubble.cursorEl, assistantText, 8);
             chatHistory.push({role: "assistant", text: assistantText});
-            reviewProgress.setTitle("Review complete");
-            reviewProgress.setState("success");
-            reviewProgress.hide();
-            requestHint.textContent = "Review complete";
-            requestHint.style.color = "#2e7d32";
+            if (isErrorLikeText(assistantText)) {
+                reviewProgress.setTitle("Review failed");
+                reviewProgress.setState("error");
+                requestHint.textContent = "Review failed";
+                requestHint.style.color = "#d32f2f";
+            } else {
+                reviewProgress.setTitle("Review complete");
+                reviewProgress.setState("success");
+                requestHint.textContent = "Review complete";
+                requestHint.style.color = "#2e7d32";
+                reviewProgress.hide();
+            }
         } catch (err) {
-            reviewProgress.addLog("Error: " + err.message, "error");
+            var streamErr = toActionableErrorMessage(err.message);
+            markConnectionStatusFromError(streamErr);
+            reviewProgress.addLog("Error: " + streamErr, "error");
             reviewProgress.setTitle("Review failed");
             reviewProgress.setState("error");
-            requestHint.textContent = "Error: " + err.message;
+            requestHint.textContent = "Error: " + streamErr;
             requestHint.style.color = "#d32f2f";
         }
     })();
@@ -1285,11 +1758,19 @@ confStartBtn.addEventListener("click", function() {
     const authSettingsModal = document.getElementById('auth-settings-modal');
     const authSettingsCloseBtn = document.getElementById('auth-settings-close');
     const authSettingsView = document.getElementById('auth-settings-view');
-    const authSettingsEdit = document.getElementById('auth-settings-edit');
-    const editAuthBtn = document.getElementById('edit-auth-btn');
-    const saveAuthBtn = document.getElementById('save-auth-btn');
-    const cancelAuthBtn = document.getElementById('cancel-auth-btn');
     const clearAuthBtn = document.getElementById('clear-auth-btn');
+    const editConfluenceAuthBtn = document.getElementById('edit-confluence-auth-btn');
+    const editGithubAuthBtn = document.getElementById('edit-github-auth-btn');
+
+    const confluenceAuthModal = document.getElementById('confluence-auth-modal');
+    const confluenceAuthCloseBtn = document.getElementById('confluence-auth-close');
+    const saveConfluenceAuthBtn = document.getElementById('save-confluence-auth-btn');
+    const cancelConfluenceAuthBtn = document.getElementById('cancel-confluence-auth-btn');
+
+    const githubAuthModal = document.getElementById('github-auth-modal');
+    const githubAuthCloseBtn = document.getElementById('github-auth-close');
+    const saveGithubAuthBtn = document.getElementById('save-github-auth-btn');
+    const cancelGithubAuthBtn = document.getElementById('cancel-github-auth-btn');
 
     const editConfluenceEmail = document.getElementById('edit-confluence-email');
     const editConfluenceToken = document.getElementById('edit-confluence-token');
@@ -1300,57 +1781,357 @@ confStartBtn.addEventListener("click", function() {
     const viewConfluenceToken = document.getElementById('view-confluence-token');
     const viewGithubOwner = document.getElementById('view-github-owner');
     const viewGithubToken = document.getElementById('view-github-token');
+    const viewConfluenceBaseUrl = document.getElementById('view-confluence-base-url');
+    const viewGithubBaseUrl = document.getElementById('view-github-base-url');
+    const viewConfluenceConnectionStatus = document.getElementById('view-confluence-connection-status');
+    const viewGithubConnectionStatus = document.getElementById('view-github-connection-status');
+    const githubConnectionPill = document.getElementById('github-connection-pill');
+    const confluenceConnectionPill = document.getElementById('confluence-connection-pill');
+    const authHistorySelect = document.getElementById('auth-history-select');
+    const restoreAuthBtn = document.getElementById('restore-auth-btn');
+    const deleteAuthRecordBtn = document.getElementById('delete-auth-record-btn');
+    const testAuthBtn = document.getElementById('test-auth-btn');
+    const authTestResult = document.getElementById('auth-test-result');
 
-    function showAuthView() {
-        if (!authSettingsView || !authSettingsEdit) return;
-        authSettingsView.style.display = '';
-        authSettingsEdit.style.display = 'none';
+    const editConfluenceBaseUrl = document.getElementById('edit-confluence-base-url');
+    const editGithubBaseUrl = document.getElementById('edit-github-base-url');
+
+    function loadConnectionStatus() {
+        try {
+            const raw = localStorage.getItem(USER_CONNECTION_STATUS_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            return parsed;
+        } catch (err) {
+            return null;
+        }
     }
 
-    function showAuthEdit() {
-        if (!authSettingsView || !authSettingsEdit) return;
-        authSettingsView.style.display = 'none';
-        authSettingsEdit.style.display = '';
+    function saveConnectionStatus(status) {
+        if (!status || typeof status !== 'object') {
+            localStorage.removeItem(USER_CONNECTION_STATUS_KEY);
+            return;
+        }
+        localStorage.setItem(USER_CONNECTION_STATUS_KEY, JSON.stringify(status));
+    }
+
+    function makeDefaultConnectionStatus(auth) {
+        const hasGithub = !!(auth.github_owner && auth.github_token);
+        const hasConfluence = !!(auth.confluence_email && auth.confluence_api_token && auth.confluence_base_url);
+        return {
+            github: {
+                state: hasGithub ? 'untested' : 'missing',
+                message: hasGithub ? 'Credentials set. Run Test Connection.' : 'Missing owner or token.'
+            },
+            confluence: {
+                state: hasConfluence ? 'untested' : 'missing',
+                message: hasConfluence ? 'Credentials set. Run Test Connection.' : 'Missing email, token, or base URL.'
+            },
+            tested_at: ''
+        };
+    }
+
+    function setConnectionPill(pillEl, label, state) {
+        if (!pillEl) return;
+        var normalized = state || 'unknown';
+        pillEl.classList.remove('valid', 'invalid', 'missing', 'untested', 'unknown');
+        pillEl.classList.add(normalized);
+        var pretty = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+        pillEl.textContent = label + ': ' + pretty;
+    }
+
+    function renderConnectionStatus() {
+        const auth = loadUserAuth();
+        const stored = loadConnectionStatus() || makeDefaultConnectionStatus(auth);
+        const githubState = (stored.github && stored.github.state) || 'unknown';
+        const githubMsg = (stored.github && stored.github.message) || 'Unknown';
+        const confState = (stored.confluence && stored.confluence.state) || 'unknown';
+        const confMsg = (stored.confluence && stored.confluence.message) || 'Unknown';
+
+        setConnectionPill(githubConnectionPill, 'GitHub', githubState);
+        setConnectionPill(confluenceConnectionPill, 'Confluence', confState);
+
+        if (viewGithubConnectionStatus) viewGithubConnectionStatus.textContent = githubState.toUpperCase() + ' - ' + githubMsg;
+        if (viewConfluenceConnectionStatus) viewConfluenceConnectionStatus.textContent = confState.toUpperCase() + ' - ' + confMsg;
+    }
+
+    function resetConnectionStatusFromAuth(auth) {
+        const clean = normalizeUserAuth(auth || {});
+        saveConnectionStatus(makeDefaultConnectionStatus(clean));
+        renderConnectionStatus();
+    }
+
+    function markConnectionStatusFromError(message) {
+        var text = String(message || '').toLowerCase();
+        if (!text) return;
+        var status = loadConnectionStatus() || makeDefaultConnectionStatus(loadUserAuth());
+        var touched = false;
+
+        if (text.includes('github') || text.includes('/repos/') || text.includes('pull request')) {
+            status.github = { state: 'invalid', message: 'Token/session may be expired or invalid. Re-test credentials.' };
+            touched = true;
+        }
+        if (text.includes('confluence') || text.includes('/rest/api/') || text.includes('page id')) {
+            status.confluence = { state: 'invalid', message: 'Token/session may be expired or invalid. Re-test credentials.' };
+            touched = true;
+        }
+
+        if (!touched && isAuthErrorLikeText(text)) {
+            if (status.github && status.github.state !== 'missing') {
+                status.github = { state: 'invalid', message: 'Token/session may be expired or invalid. Re-test credentials.' };
+            }
+            if (status.confluence && status.confluence.state !== 'missing') {
+                status.confluence = { state: 'invalid', message: 'Token/session may be expired or invalid. Re-test credentials.' };
+            }
+        }
+
+        saveConnectionStatus(status);
+        renderConnectionStatus();
+    }
+
+    async function runConnectionTest(authCandidate) {
+        if (authTestResult) {
+            authTestResult.textContent = 'Testing connections...';
+            authTestResult.style.color = '#555';
+        }
+        try {
+            const res = await fetch('/api/test-connections', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_auth: normalizeUserAuth(authCandidate || {}) })
+            });
+            const data = await res.json();
+            if (!res.ok || (data && data.success === false)) {
+                throw new Error((data && (data.error || data.message)) || 'Connection test request failed.');
+            }
+            const results = (data && data.results) || {};
+            const status = {
+                github: results.github || { state: 'unknown', message: 'No result' },
+                confluence: results.confluence || { state: 'unknown', message: 'No result' },
+                tested_at: new Date().toISOString()
+            };
+            const normalizedCandidate = normalizeUserAuth(authCandidate || {});
+            const hasUsableGithub = status.github && status.github.state === 'valid';
+            const hasUsableConfluence = status.confluence && status.confluence.state === 'valid';
+            if (hasUsableGithub || hasUsableConfluence) {
+                saveUserAuth(normalizedCandidate);
+                renderAuthView();
+                renderAuthHistoryOptions();
+            }
+            saveConnectionStatus(status);
+            renderConnectionStatus();
+            if (authTestResult) {
+                authTestResult.textContent = 'GitHub: ' + (status.github.state || 'unknown') + ' | Confluence: ' + (status.confluence.state || 'unknown');
+                authTestResult.style.color = (status.github.state === 'valid' && status.confluence.state === 'valid') ? '#1b7f3b' : '#b42318';
+            }
+        } catch (err) {
+            const msg = toActionableErrorMessage(err && err.message ? err.message : 'Connection test failed.');
+            markConnectionStatusFromError(msg);
+            if (authTestResult) {
+                authTestResult.textContent = 'Connection test failed: ' + msg;
+                authTestResult.style.color = '#b42318';
+            }
+        }
+    }
+
+    function setSavedTokenValue(viewEl, value) {
+        if (!viewEl) return;
+        var token = String(value || '');
+        viewEl.dataset.secret = token;
+        viewEl.dataset.revealed = 'false';
+        viewEl.textContent = token ? maskSecret(token) : 'Not set';
     }
 
     function resetTokenToggleButtons() {
         document.querySelectorAll('.token-toggle').forEach(function(btn) {
             const targetId = btn.getAttribute('data-target');
             const targetInput = targetId ? document.getElementById(targetId) : null;
-            if (targetInput) targetInput.type = 'password';
+            if (targetInput && targetInput.tagName === 'INPUT') {
+                targetInput.type = 'password';
+                btn.textContent = 'Show';
+                btn.setAttribute('aria-pressed', 'false');
+                return;
+            }
+            if (targetInput) {
+                targetInput.dataset.revealed = 'false';
+                var secret = String(targetInput.dataset.secret || '');
+                targetInput.textContent = secret ? maskSecret(secret) : 'Not set';
+            }
             btn.textContent = 'Show';
             btn.setAttribute('aria-pressed', 'false');
         });
     }
 
-    function fillAuthEditFields() {
+    if (testAuthBtn) {
+        testAuthBtn.addEventListener('click', function() {
+            runConnectionTest(loadUserAuth());
+        });
+    }
+
+    if (restoreAuthBtn) {
+        restoreAuthBtn.addEventListener('click', function() {
+            const selected = getSelectedAuthHistoryRecord();
+            if (!selected || !selected.auth) {
+                showUiAlert('Please select a credential record to restore.');
+                return;
+            }
+            saveUserAuth(selected.auth);
+            resetConnectionStatusFromAuth(selected.auth);
+            renderAuthView();
+            fillConfluenceEditFields();
+            fillGithubEditFields();
+        });
+    }
+
+    if (deleteAuthRecordBtn) {
+        deleteAuthRecordBtn.addEventListener('click', function() {
+            const selected = getSelectedAuthHistoryRecord();
+            if (!selected) {
+                showUiAlert('Please select a credential record to delete.');
+                return;
+            }
+            const history = loadAuthHistory().filter(function(entry) {
+                return entry.id !== selected.id;
+            });
+            saveAuthHistory(history);
+            renderAuthHistoryOptions();
+        });
+    }
+
+    function fillConfluenceEditFields() {
         const auth = loadUserAuth();
         if (editConfluenceEmail) editConfluenceEmail.value = auth.confluence_email || '';
         if (editConfluenceToken) editConfluenceToken.value = auth.confluence_api_token || '';
+        if (editConfluenceBaseUrl) editConfluenceBaseUrl.value = auth.confluence_base_url || '';
+        resetTokenToggleButtons();
+    }
+
+    function fillGithubEditFields() {
+        const auth = loadUserAuth();
         if (editGithubOwner) editGithubOwner.value = auth.github_owner || '';
         if (editGithubToken) editGithubToken.value = auth.github_token || '';
+        if (editGithubBaseUrl) editGithubBaseUrl.value = auth.github_base_url || 'https://api.github.com';
         resetTokenToggleButtons();
     }
 
     function renderAuthView() {
         const auth = loadUserAuth();
         if (viewConfluenceEmail) viewConfluenceEmail.textContent = auth.confluence_email || 'Not set';
-        if (viewConfluenceToken) viewConfluenceToken.textContent = maskSecret(auth.confluence_api_token || '');
+        setSavedTokenValue(viewConfluenceToken, auth.confluence_api_token || '');
         if (viewGithubOwner) viewGithubOwner.textContent = auth.github_owner || 'Not set';
-        if (viewGithubToken) viewGithubToken.textContent = maskSecret(auth.github_token || '');
+        setSavedTokenValue(viewGithubToken, auth.github_token || '');
+        if (viewConfluenceBaseUrl) viewConfluenceBaseUrl.textContent = auth.confluence_base_url || 'Not set';
+        if (viewGithubBaseUrl) viewGithubBaseUrl.textContent = auth.github_base_url || 'https://api.github.com';
+        resetTokenToggleButtons();
+        renderConnectionStatus();
+    }
+
+    function renderAuthHistoryOptions() {
+        if (!authHistorySelect) return;
+        const history = loadAuthHistory();
+        authHistorySelect.innerHTML = '';
+
+        if (!history.length) {
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = 'No saved credential records yet';
+            authHistorySelect.appendChild(none);
+            authHistorySelect.disabled = true;
+            if (restoreAuthBtn) restoreAuthBtn.disabled = true;
+            if (deleteAuthRecordBtn) deleteAuthRecordBtn.disabled = true;
+            return;
+        }
+
+        authHistorySelect.disabled = false;
+        if (restoreAuthBtn) restoreAuthBtn.disabled = false;
+        if (deleteAuthRecordBtn) deleteAuthRecordBtn.disabled = false;
+
+        history.forEach(function(entry) {
+            const option = document.createElement('option');
+            option.value = entry.id;
+            option.textContent = formatAuthHistoryLabel(entry);
+            authHistorySelect.appendChild(option);
+        });
+    }
+
+    function getSelectedAuthHistoryRecord() {
+        if (!authHistorySelect || !authHistorySelect.value) return null;
+        const selectedId = authHistorySelect.value;
+        const history = loadAuthHistory();
+        for (var i = 0; i < history.length; i += 1) {
+            if (history[i].id === selectedId) {
+                return history[i];
+            }
+        }
+        return null;
     }
 
     function openAuthModal() {
         renderAuthView();
-        fillAuthEditFields();
-        showAuthView();
+        renderAuthHistoryOptions();
+        fillConfluenceEditFields();
+        fillGithubEditFields();
+        if (authTestResult) {
+            authTestResult.textContent = 'Run a connection test to validate credentials.';
+            authTestResult.style.color = '#666';
+        }
         if (authSettingsModal) authSettingsModal.classList.add('active');
     }
 
     function closeAuthModal() {
         if (authSettingsModal) authSettingsModal.classList.remove('active');
-        showAuthView();
         resetTokenToggleButtons();
+    }
+
+    function openConfluenceAuthModal() {
+        fillConfluenceEditFields();
+        if (confluenceAuthModal) confluenceAuthModal.classList.add('active');
+    }
+
+    function closeConfluenceAuthModal() {
+        if (confluenceAuthModal) confluenceAuthModal.classList.remove('active');
+        resetTokenToggleButtons();
+    }
+
+    function openGithubAuthModal() {
+        fillGithubEditFields();
+        if (githubAuthModal) githubAuthModal.classList.add('active');
+    }
+
+    function closeGithubAuthModal() {
+        if (githubAuthModal) githubAuthModal.classList.remove('active');
+        resetTokenToggleButtons();
+    }
+
+    function saveConfluenceCredentials() {
+        const current = loadUserAuth();
+        const nextAuth = Object.assign({}, current, {
+            confluence_email: editConfluenceEmail ? editConfluenceEmail.value : '',
+            confluence_api_token: editConfluenceToken ? editConfluenceToken.value : '',
+            confluence_base_url: editConfluenceBaseUrl ? editConfluenceBaseUrl.value : ''
+        });
+        const saved = saveUserAuth(nextAuth);
+        resetConnectionStatusFromAuth(saved);
+        addAuthHistoryRecord(saved);
+        renderAuthView();
+        renderAuthHistoryOptions();
+        closeConfluenceAuthModal();
+    }
+
+    function saveGithubCredentials() {
+        const current = loadUserAuth();
+        const nextAuth = Object.assign({}, current, {
+            github_owner: editGithubOwner ? editGithubOwner.value : '',
+            github_token: editGithubToken ? editGithubToken.value : '',
+            github_base_url: editGithubBaseUrl ? editGithubBaseUrl.value : 'https://api.github.com'
+        });
+        const saved = saveUserAuth(nextAuth);
+        resetConnectionStatusFromAuth(saved);
+        addAuthHistoryRecord(saved);
+        renderAuthView();
+        renderAuthHistoryOptions();
+        closeGithubAuthModal();
     }
 
     if (authSettingsBtn && authSettingsModal) {
@@ -1366,39 +2147,56 @@ confStartBtn.addEventListener("click", function() {
         });
     }
 
-    if (editAuthBtn) {
-        editAuthBtn.addEventListener('click', function() {
-            fillAuthEditFields();
-            showAuthEdit();
+    if (editConfluenceAuthBtn) {
+        editConfluenceAuthBtn.addEventListener('click', openConfluenceAuthModal);
+    }
+
+    if (editGithubAuthBtn) {
+        editGithubAuthBtn.addEventListener('click', openGithubAuthModal);
+    }
+
+    if (confluenceAuthCloseBtn && confluenceAuthModal) {
+        confluenceAuthCloseBtn.addEventListener('click', closeConfluenceAuthModal);
+        confluenceAuthModal.addEventListener('click', function(event) {
+            if (event.target === confluenceAuthModal) {
+                closeConfluenceAuthModal();
+            }
         });
     }
 
-    if (cancelAuthBtn) {
-        cancelAuthBtn.addEventListener('click', function() {
-            fillAuthEditFields();
-            showAuthView();
+    if (githubAuthCloseBtn && githubAuthModal) {
+        githubAuthCloseBtn.addEventListener('click', closeGithubAuthModal);
+        githubAuthModal.addEventListener('click', function(event) {
+            if (event.target === githubAuthModal) {
+                closeGithubAuthModal();
+            }
         });
     }
 
-    if (saveAuthBtn) {
-        saveAuthBtn.addEventListener('click', function() {
-            const nextAuth = {
-                confluence_email: editConfluenceEmail ? editConfluenceEmail.value : '',
-                confluence_api_token: editConfluenceToken ? editConfluenceToken.value : '',
-                github_owner: editGithubOwner ? editGithubOwner.value : '',
-                github_token: editGithubToken ? editGithubToken.value : ''
-            };
-            saveUserAuth(nextAuth);
-            renderAuthView();
-            showAuthView();
-        });
+    if (cancelConfluenceAuthBtn) {
+        cancelConfluenceAuthBtn.addEventListener('click', closeConfluenceAuthModal);
+    }
+
+    if (cancelGithubAuthBtn) {
+        cancelGithubAuthBtn.addEventListener('click', closeGithubAuthModal);
+    }
+
+    if (saveConfluenceAuthBtn) {
+        saveConfluenceAuthBtn.addEventListener('click', saveConfluenceCredentials);
+    }
+
+    if (saveGithubAuthBtn) {
+        saveGithubAuthBtn.addEventListener('click', saveGithubCredentials);
     }
 
     if (clearAuthBtn) {
         clearAuthBtn.addEventListener('click', function() {
             saveUserAuth({});
+            resetConnectionStatusFromAuth({});
             renderAuthView();
-            fillAuthEditFields();
+            renderAuthHistoryOptions();
+            fillConfluenceEditFields();
+            fillGithubEditFields();
         });
     }
 
@@ -1407,10 +2205,22 @@ confStartBtn.addEventListener("click", function() {
             const targetId = btn.getAttribute('data-target');
             const targetInput = targetId ? document.getElementById(targetId) : null;
             if (!targetInput) return;
-            const isHidden = targetInput.type === 'password';
-            targetInput.type = isHidden ? 'text' : 'password';
-            btn.textContent = isHidden ? 'Hide' : 'Show';
-            btn.setAttribute('aria-pressed', isHidden ? 'true' : 'false');
+
+            if (targetInput.tagName === 'INPUT') {
+                const isHidden = targetInput.type === 'password';
+                targetInput.type = isHidden ? 'text' : 'password';
+                btn.textContent = isHidden ? 'Hide' : 'Show';
+                btn.setAttribute('aria-pressed', isHidden ? 'true' : 'false');
+                return;
+            }
+
+            const wasRevealed = targetInput.dataset.revealed === 'true';
+            const secret = String(targetInput.dataset.secret || '');
+            const revealNext = !wasRevealed;
+            targetInput.dataset.revealed = revealNext ? 'true' : 'false';
+            targetInput.textContent = secret ? (revealNext ? secret : maskSecret(secret)) : 'Not set';
+            btn.textContent = revealNext ? 'Hide' : 'Show';
+            btn.setAttribute('aria-pressed', revealNext ? 'true' : 'false');
         });
     });
 
@@ -1713,6 +2523,7 @@ confStartBtn.addEventListener("click", function() {
     }
 
     renderAuthView();
+    resetConnectionStatusFromAuth(loadUserAuth());
 
     if (!localStorage.getItem(ONBOARDING_SEEN_KEY)) {
         window.setTimeout(function() {

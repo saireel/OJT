@@ -7,7 +7,6 @@ import logging
 import re
 
 import requests
-import config
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

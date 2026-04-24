@@ -6,7 +6,6 @@ import difflib
 import re
 
 import requests
-import config
 from requests.exceptions import HTTPError
 
 class GitHubSyntaxActions:
