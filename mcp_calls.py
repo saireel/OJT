@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from confluence_reviewer import confluence_api, ReviewActions, SyntaxActions
 from github_reviewer import github_api
+from combined_review.combined_review import execute_combined_check
 
 # Shared instances (created once, reused across all calls)
 syntax_actions = SyntaxActions(confluence_api)
@@ -381,6 +382,148 @@ def review_pull_request(repo: str, pr_number: int, checklist: list, skip_inline:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+# ============================================================================
+# COMBINED REVIEW FUNCTIONS - Wrappers for combined PR and Confluence reviews
+# ============================================================================
+
+def check_doc_coverage(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Check documentation coverage for new or modified code.
+    
+    Cross-checks:
+    - Does the PR documentation reference the PR changes?
+    - Is all new code documented in the Confluence page?
+    """
+    try:
+        # Pass both PR and Confluence content for cross-checking
+        return execute_combined_check("doc_coverage", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_code_examples(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Check that code examples in documentation match PR changes.
+    
+    Cross-checks:
+    - Do examples in Confluence match the actual changes in PR?
+    """
+    try:
+        return execute_combined_check("code_examples", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_api_signatures(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Check that API/function signatures are up to date.
+    
+    Cross-checks:
+    - Do API docs in Confluence match PR signature changes?
+    - Are all new APIs documented?
+    """
+    try:
+        return execute_combined_check("api_signatures", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_config_documented(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Check that new configuration or environment variables are documented.
+    
+    Cross-checks:
+    - Are new config vars from PR documented in Confluence?
+    """
+    try:
+        return execute_combined_check("config_documented", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_architecture_alignment(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Ensure PR changes align with documented architecture and design decisions.
+    
+    Cross-checks:
+    - Do the PR changes follow the architecture documented in Confluence?
+    - Are design decisions properly documented?
+    """
+    try:
+        return execute_combined_check("architecture_alignment", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_instructions_match(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Verify step-by-step instructions match the implementation.
+    
+    Cross-checks:
+    - Do the instructions in Confluence reflect the actual implementation in PR?
+    """
+    try:
+        return execute_combined_check("instructions_match", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_error_handling(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Verify error handling and edge cases are documented.
+    
+    Cross-checks:
+    - Are error cases introduced in PR documented in Confluence?
+    - Are edge cases documented?
+    """
+    try:
+        return execute_combined_check("error_handling", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_deprecated_removed(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Check that deprecated features and APIs are removed from documentation.
+    
+    Cross-checks:
+    - If PR removes deprecated code, is it removed from Confluence docs?
+    """
+    try:
+        return execute_combined_check("deprecated_removed", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_terminology_consistent(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Verify consistent terminology between code and documentation.
+    
+    Cross-checks:
+    - Is terminology used in PR consistent with Confluence docs?
+    - Are new terms documented?
+    """
+    try:
+        return execute_combined_check("terminology_consistent", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_pr_references(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Verify links to PR and ticket references are present in documentation.
+    
+    Cross-checks:
+    - Does Confluence documentation reference the PR?
+    - Are related tickets/issues documented?
+    """
+    try:
+        return execute_combined_check("pr_references", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
+
+
+def check_code_path_sections(pr_content, pr_sha, conf_content, conf_page_id, repo, **kwargs):
+    """Check that documentation sections cover all new code paths and functions.
+    
+    Cross-checks:
+    - Does Confluence cover all new code paths introduced in PR?
+    - Are all new functions documented?
+    """
+    try:
+        return execute_combined_check("code_path_sections", repo, pr_sha, pr_content, conf_content)
+    except Exception as e:
+        return {"compliant": False, "error": str(e)}
 def cleanup_old_bot_comments(
     repo: str,
     pr_number: int,

@@ -92,6 +92,7 @@ class GitHubReviewActions:
 
                 # Use sys.executable -m flake8 to avoid PATH issues in subprocess envs
                 cmd = [sys.executable, "-m", "flake8", "--max-line-length=120"] + list(path_map.keys())
+                proc = None
                 try:
                     proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -99,8 +100,9 @@ class GitHubReviewActions:
                     )
                     stdout, stderr = proc.communicate(timeout=30)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.communicate()
+                    if proc is not None:
+                        proc.kill()
+                        proc.communicate()
                     logger.info("[REVIEW] Flake8 timed out after 30s — skipping flake8 check")
                     return {"compliant": False, "violations_count": 0, "violations": [],
                             "skipped": True, "skip_reason": "flake8 timed out"}

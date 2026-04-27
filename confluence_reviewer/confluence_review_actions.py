@@ -108,6 +108,8 @@ class ReviewActions:
         "long_sentence": "warning",
         "long_paragraph": "warning",
         "duplicate_content": "warning",
+        "formatting": "warning",
+        "empty_section": "warning",
         "structure": "info",
         "readability": "info",
         "spelling_consistency": "info",
@@ -457,6 +459,99 @@ class ReviewActions:
                 "Page appears text-heavy under a single heading; consider adding subsections.",
                 "",
             )
+
+    def _run_formatting_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
+        """Detect obvious formatting issues such as uneven bullets, excessive punctuation, and spacing noise."""
+        logger.info("[REVIEW] Running formatting check")
+        flagged = 0
+        seen: set[tuple[str, str]] = set()
+
+        def _flag(message: str, excerpt: str) -> None:
+            nonlocal flagged
+            key = (message, (excerpt or "")[:120].lower())
+            if key in seen:
+                return
+            seen.add(key)
+            self._record_issue(state, "formatting", message, excerpt)
+            if excerpt:
+                self._post_issue_inline(page_id, state, message, excerpt)
+            flagged += 1
+
+        # Mixed bullet styles in the same page often indicate inconsistent formatting.
+        bullet_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            m = re.match(r"^(?:[-*]|\d+[.)])\s+", stripped)
+            if m:
+                bullet_lines.append((m.group(0).strip(), stripped))
+        bullet_styles = {token for token, _ in bullet_lines}
+        if len(bullet_lines) >= 4 and len(bullet_styles) >= 2:
+            sample = "\n".join(line for _, line in bullet_lines[:3])
+            _flag(
+                "Inconsistent list formatting detected. Use one bullet/numbering style within the same section.",
+                sample,
+            )
+
+        for m in re.finditer(r"([!?.,;:])\1{2,}", text):
+            excerpt = self.syntax._extract_surrounding_sentence(m.group(0), text)
+            _flag(
+                "Excessive repeated punctuation found. Keep punctuation concise for readability.",
+                excerpt,
+            )
+            if flagged >= 6:
+                break
+
+        if flagged < 6:
+            for line in text.splitlines():
+                if re.search(r"\S\s{3,}\S", line):
+                    _flag(
+                        "Irregular spacing detected. Normalize spacing for consistent formatting.",
+                        line.strip()[:220],
+                    )
+                    if flagged >= 6:
+                        break
+
+    def _run_empty_section_check(self, page_id: str, storage: str, state: Dict[str, Any]) -> None:
+        """Detect headings with little or no body content below them."""
+        logger.info("[REVIEW] Running empty_section check")
+        source = storage or ""
+        heading_matches = list(re.finditer(r"<h([1-6])[^>]*>(.*?)</h\1>", source, flags=re.IGNORECASE | re.DOTALL))
+        if not heading_matches:
+            return
+
+        flagged = 0
+        for idx, match in enumerate(heading_matches):
+            heading_raw = re.sub(r"<[^>]+>", " ", match.group(2) or "")
+            heading = re.sub(r"\s+", " ", html.unescape(heading_raw)).strip()
+            if not heading:
+                continue
+
+            body_start = match.end()
+            body_end = heading_matches[idx + 1].start() if idx + 1 < len(heading_matches) else len(source)
+            body_html = source[body_start:body_end]
+            body_text = re.sub(r"<[^>]+>", " ", body_html)
+            body_text = re.sub(r"\s+", " ", html.unescape(body_text)).strip()
+            word_count = len(re.findall(r"\b\w+\b", body_text))
+            lowered = body_text.lower()
+
+            placeholder_only = lowered in {
+                "tbd", "todo", "n/a", "na", "none", "coming soon", "to be added"
+            }
+            if word_count >= 8 and not placeholder_only:
+                continue
+
+            message = (
+                f"Section '{heading}' appears incomplete or empty. "
+                "Add meaningful content or remove the heading."
+            )
+            excerpt = heading if not body_text else f"{heading} - {body_text[:160]}"
+            self._record_issue(state, "empty_section", message, excerpt)
+            self._post_issue_inline(page_id, state, message, heading)
+            flagged += 1
+            if flagged >= 6:
+                break
 
     def _run_statistics_validation_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Validate statistical claims: percentages, counts, breakdowns, and consistency."""
@@ -1269,12 +1364,12 @@ class ReviewActions:
             "citation": "Citation Gaps",
             "alt_text": "Missing Alt Text",
             "fragment": "Sentence Fragments",
-            "staleness": "Outdated References",
-            "formatting": "Excessive Formatting",
+            "formatting": "Consistent Formatting",
             "long_sentence": "Long Sentences",
             "long_paragraph": "Long Paragraphs",
             "duplicate_content": "Duplicate Content",
             "table_validation": "Table Issues",
+            "empty_section": "Missing Sections / Incomplete Content",
         }
 
         type_descriptions = {
@@ -1402,68 +1497,6 @@ class ReviewActions:
             category_html += "</table>"
             sections.append(category_html)
 
-        # === READABILITY METRICS (EXPLAINED) ===
-        page_text = state.get("text", "")
-        if page_text:
-            try:
-                flesch_ease = self._calculate_flesch_reading_ease(page_text)
-                flesch_grade = self._calculate_flesch_kincaid_grade(page_text)
-
-                def ease_interpretation(score: float) -> Tuple[str, str]:
-                    if score >= 90:
-                        return "Very Easy", "Understood by most 11-year-old readers."
-                    if score >= 80:
-                        return "Easy", "Conversational and straightforward for broad audiences."
-                    if score >= 70:
-                        return "Fairly Easy", "Comfortable for general readers with minimal effort."
-                    if score >= 60:
-                        return "Standard", "Suitable for typical business and web content."
-                    if score >= 50:
-                        return "Fairly Difficult", "May feel dense; simplification can improve scanability."
-                    if score >= 30:
-                        return "Difficult", "Likely requires careful reading and domain familiarity."
-                    return "Very Difficult", "Academic or technical density; consider simplification."
-
-                def grade_interpretation(score: float) -> Tuple[str, str]:
-                    if score <= 6:
-                        return "Elementary", "Accessible to a broad audience."
-                    if score <= 8:
-                        return "Middle School", "Generally clear for non-specialist readers."
-                    if score <= 10:
-                        return "High School", "Appropriate for most professional internal documentation."
-                    if score <= 13:
-                        return "College", "Better for expert audiences; may be dense for general readers."
-                    return "Graduate", "Highly complex language; simplify where possible."
-
-                ease_label, ease_note = ease_interpretation(flesch_ease)
-                grade_label, grade_note = grade_interpretation(flesch_grade)
-
-                sections.append("<p><strong>Readability Metrics (Explained):</strong></p>")
-                readability_html = "<table><tr><th>Metric</th><th>Score</th><th>Interpretation</th><th>What This Means</th></tr>"
-                readability_html += (
-                    "<tr>"
-                    f"<td>Flesch Reading Ease</td><td>{flesch_ease:.1f}</td>"
-                    f"<td>{html.escape(ease_label)}</td><td>{html.escape(ease_note)}</td>"
-                    "</tr>"
-                )
-                readability_html += (
-                    "<tr>"
-                    f"<td>Flesch-Kincaid Grade Level</td><td>{flesch_grade:.1f}</td>"
-                    f"<td>{html.escape(grade_label)}</td><td>{html.escape(grade_note)}</td>"
-                    "</tr>"
-                )
-                readability_html += "</table>"
-                sections.append(readability_html)
-
-                readability_guidance = (
-                    "Flesch Reading Ease is better when higher; Flesch-Kincaid Grade Level is better when lower. "
-                    "If ease is below 60 or grade is above 10, prioritize shorter sentences, simpler vocabulary, "
-                    "and smaller paragraphs."
-                )
-                sections.append(f"<p><em>{html.escape(readability_guidance)}</em></p>")
-            except Exception:
-                logger.warning("[REVIEW] Could not calculate readability metrics")
-
         # === QUALITY ASSESSMENT ===
         sections.append("<p><strong>Overall Quality Assessment:</strong></p>")
         if total_issues == 0:
@@ -1563,8 +1596,12 @@ class ReviewActions:
 
         check_handlers = {
             "grammar": lambda: self._run_grammar_check(page_id, text, state),
+            "spelling_grammar": lambda: self._run_grammar_check(page_id, text, state),
+            "spellinggrammar": lambda: self._run_grammar_check(page_id, text, state),
             "context_noise": lambda: self._run_context_noise_check(page_id, text, state),
             "repeated_word": lambda: self._run_repeated_word_check(page_id, text, state),
+            "repeated_words": lambda: self._run_repeated_word_check(page_id, text, state),
+            "repeatedwords": lambda: self._run_repeated_word_check(page_id, text, state),
             "long_sentence": lambda: self._run_long_sentence_check(page_id, text, state),
             "long_paragraph": lambda: self._run_long_paragraph_check(page_id, text, state),
             "structure": lambda: self._run_structure_check(storage, state),
@@ -1573,6 +1610,8 @@ class ReviewActions:
             "citation": lambda: self._run_citation_check(page_id, text, state),
             "readability": lambda: self._run_readability_check(page_id, text, state),
             "duplicate_content": lambda: self._run_duplicate_check(page_id, text, state),
+            "formatting": lambda: self._run_formatting_check(page_id, text, state),
+            "empty_section": lambda: self._run_empty_section_check(page_id, storage, state),
             "table_validation": lambda: self._run_table_validation_check(page_id, storage, text, state),
         }
 

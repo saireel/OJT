@@ -216,27 +216,30 @@ function syncConfluenceChecklistVisibility(mode) {
     // Confluence Panel checklists
     var confOnlyList = document.getElementById("confluence-only-checklist-items");
     var confCombinedList = document.getElementById("confluence-combined-checklist-items");
-    
+
     // PR Panel checklists
     var prOnlyList = document.getElementById("pr-only-checklist-items");
     var prCombinedList = document.getElementById("pr-combined-checklist-items");
-    
+
     var legacyList = document.getElementById("confluence-checklist-items");
 
-    // Handle Confluence Panel
-    if (confOnlyList && confCombinedList) {
+    // Handle Confluence Panel with graceful fallback when one checklist is missing.
+    if (confOnlyList || confCombinedList) {
         if (mode === "confluence") {
-            confOnlyList.style.display = "block";
-            confCombinedList.style.display = "none";
-            console.log("Confluence panel: showing only checklist");
+            if (confOnlyList) confOnlyList.style.display = "block";
+            if (confCombinedList) confCombinedList.style.display = "none";
         } else {
-            // Treat both combined and pr mode as combined checklist in Confluence panel.
-            confOnlyList.style.display = "none";
-            confCombinedList.style.display = "block";
-            console.log("Confluence panel: showing combined checklist");
+            // Combined and PR-in-confluence mode should show a combined checklist if present,
+            // otherwise keep the only-list visible so the checklist is never blank.
+            if (confCombinedList) {
+                confCombinedList.style.display = "block";
+                if (confOnlyList) confOnlyList.style.display = "none";
+            } else if (confOnlyList) {
+                confOnlyList.style.display = "block";
+            }
         }
     }
-    
+
     // Handle PR Panel
     if (prOnlyList && prCombinedList) {
         if (mode === "pr") {
@@ -259,6 +262,13 @@ function setQuickReviewMode(mode) {
     if (confPrLinkGroup) {
         confPrLinkGroup.style.display = quickReviewMode === "combined" ? "" : "none";
     }
+
+    var confDocTypeGroup = document.getElementById("confluence-doc-type-group");
+    if (confDocTypeGroup) {
+        // Hide doc type in combined mode per panel UX expectation.
+        confDocTypeGroup.style.display = quickReviewMode === "combined" ? "none" : "";
+    }
+
     syncConfluenceChecklistVisibility(quickReviewMode);
     if (confluenceReviewTitle) {
         confluenceReviewTitle.textContent = getReviewPanelTitle(quickReviewMode);
@@ -778,7 +788,8 @@ startReviewBtn.addEventListener("click", function() {
     if (activeChecklist) {
         activeChecklist.querySelectorAll(".check-item").forEach(function(item) {
             if (item.querySelector("input").checked) {
-                checklist.push(item.querySelector("span").textContent);
+                var selectedCheck = getChecklistItemValue(item);
+                if (selectedCheck) checklist.push(selectedCheck);
             }
         });
     }
@@ -1222,6 +1233,14 @@ function getActiveConfluenceChecklistContainer() {
     // For combined or pr mode, always prefer the combined checklist.
     return combinedList || legacyList || onlyList;
 }
+function getChecklistItemValue(item) {
+    if (!item) return "";
+    var checkId = item.getAttribute("data-check-id");
+    if (checkId) return checkId.trim();
+    var label = item.querySelector("span");
+    return label ? label.textContent.trim() : "";
+}
+
 function getUiAlertHost() {
     var existing = document.getElementById("ui-alert-host");
     if (existing) {
@@ -1460,7 +1479,8 @@ confStartBtn.addEventListener("click", function() {
     if (activeConfluenceChecklist) {
         activeConfluenceChecklist.querySelectorAll(".check-item").forEach(function(item) {
             if (item.querySelector("input").checked) {
-                checklist.push(item.querySelector("span").textContent);
+                var selectedCheck = getChecklistItemValue(item);
+                if (selectedCheck) checklist.push(selectedCheck);
             }
         });
     }
@@ -1512,42 +1532,99 @@ confStartBtn.addEventListener("click", function() {
     (async function() {
         try {
             if (currentMode === "combined") {
-                var combinedRes = await fetch("/api/chat", {
+                var githubBaseUrl = parseGithubApiBaseUrlFromPrLink(prLink);
+                var combinedPayload = withUserAuthPayload({
+                    conf_page_id: pageId,
+                    pr_owner: prMatch.owner,
+                    pr_repo: prMatch.repo,
+                    pr_number: prMatch.prNum,
+                    pr_checklist: checklist,
+                    conf_checklist: checklist,
+                    skip_inline: false,
+                    skip_footer: false,
+                    confluence_base_url: confluenceBaseUrl,
+                    github_base_url: githubBaseUrl
+                });
+
+                var combinedRes = await fetch("/api/combined-review-stream", {
                     method: "POST",
                     headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(withUserAuthPayload({
-                        prompt: msg,
-                        history: chatHistory,
-                        review_type: "document and code",
-                        doc_type: docType,
-                        checklist: checklist,
-                        outputs: outputs,
-                        confluence_checklist_page_id: pageId,
-                        confluence_base_url: confluenceBaseUrl
-                    }))
+                    body: JSON.stringify(combinedPayload)
                 });
-                var combinedData = await combinedRes.json();
-                var combinedResp = combinedData.response || combinedData.error || "No response";
-                var combinedFailed = !combinedRes.ok || !!combinedData.error || isErrorLikeText(combinedResp);
-                if (combinedFailed) {
-                    var combinedErr = toActionableErrorMessage(extractErrorMessage(combinedData, combinedResp));
-                    markConnectionStatusFromError(combinedErr);
-                    reviewProgress.addLog("Error: " + combinedErr, "error");
-                    reviewProgress.setTitle("Review failed");
-                    reviewProgress.setState("error");
-                    requestHint.textContent = "Review failed";
-                    requestHint.style.color = "#d32f2f";
-                    chatHistory.push({role: "assistant", text: combinedErr});
-                    createAssistantMessageBubble(combinedErr);
-                    return;
+
+                if (!combinedRes.ok || !combinedRes.body) {
+                    throw new Error("Combined SSE unavailable");
                 }
-                reviewProgress.addLog("OK " + combinedResp.split("\n")[0], "success");
-                reviewProgress.setTitle("Review complete");
-                reviewProgress.setState("success");
-                reviewProgress.hide();
-                chatHistory.push({role: "assistant", text: combinedResp});
-                requestHint.textContent = "Review complete";
-                requestHint.style.color = "#2e7d32";
+
+                const combinedReader = combinedRes.body.getReader();
+                const combinedDecoder = new TextDecoder();
+                let combinedBuffer = "";
+                reviewProgress.addLog("Combined review started...");
+
+                while (true) {
+                    const combinedChunk = await combinedReader.read();
+                    if (combinedChunk.done) break;
+
+                    combinedBuffer += combinedDecoder.decode(combinedChunk.value, {stream: true});
+                    const parts = combinedBuffer.split("\n\n");
+                    combinedBuffer = parts.pop();
+
+                    for (const part of parts) {
+                        if (!part.trim()) continue;
+
+                        let eventType = null;
+                        const dataLines = [];
+                        part.split("\n").forEach(function(line) {
+                            if (line.startsWith("event:")) {
+                                eventType = line.slice(6).trim();
+                            } else if (line.startsWith("data:")) {
+                                dataLines.push(line.slice(5).trim());
+                            }
+                        });
+
+                        if (!dataLines.length) continue;
+
+                        const payloadText = dataLines.join("\n");
+                        let payload;
+                        try {
+                            payload = JSON.parse(payloadText);
+                        } catch (parseErr) {
+                            payload = {message: payloadText};
+                        }
+
+                        var normalizedEventType = eventType || payload.type || "message";
+                        if (normalizedEventType === "progress") {
+                            normalizedEventType = "message";
+                        }
+
+                        if (normalizedEventType === "message" && payload.message) {
+                            reviewProgress.addLog(payload.message, payload.level || "info");
+                            requestHint.textContent = payload.message;
+                            requestHint.style.color = "#666";
+                        } else if (normalizedEventType === "done") {
+                            var doneText = payload.message || "Combined review complete.";
+                            reviewProgress.addLog(doneText, "success");
+                            reviewProgress.setTitle("Review complete");
+                            reviewProgress.setState("success");
+                            reviewProgress.hide();
+                            requestHint.textContent = "Review complete";
+                            requestHint.style.color = "#2e7d32";
+                            createAssistantMessageBubble(doneText);
+                            chatHistory.push({role: "assistant", text: doneText});
+                        } else if (normalizedEventType === "error") {
+                            var combinedErr = toActionableErrorMessage(payload.message || payload.error || "Combined review failed");
+                            markConnectionStatusFromError(combinedErr);
+                            reviewProgress.addLog(combinedErr, "error");
+                            reviewProgress.setTitle("Review failed");
+                            reviewProgress.setState("error");
+                            requestHint.textContent = "Review failed";
+                            requestHint.style.color = "#d32f2f";
+                            createAssistantMessageBubble(combinedErr);
+                            chatHistory.push({role: "assistant", text: combinedErr});
+                        }
+                    }
+                }
+
                 return;
             }
 

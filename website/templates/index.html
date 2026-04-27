@@ -198,69 +198,6 @@
                         </div>
                     </div>
 
-                    <!-- Combined (Confluence + PR) checklist (shown when mode = "combined") -->
-                    <div class="checklist-items" id="pr-combined-checklist-items" style="display:none;">
-                        <div class="check-item" data-category="naming">
-                            <input type="checkbox" checked>
-                            <span>Variable Names in Code Match Confluence Docs</span>
-                        </div>
-                        <div class="check-item" data-category="naming">
-                            <input type="checkbox" checked>
-                            <span>Function / Method Names Match Docs</span>
-                        </div>
-                        <div class="check-item" data-category="naming">
-                            <input type="checkbox" checked>
-                            <span>Class / Module Names Match Docs</span>
-                        </div>
-                        <div class="check-item" data-category="descriptions">
-                            <input type="checkbox" checked>
-                            <span>Parameter Descriptions Match PR Code Signatures</span>
-                        </div>
-                        <div class="check-item" data-category="descriptions">
-                            <input type="checkbox" checked>
-                            <span>Return Value Descriptions Match Actual Returns</span>
-                        </div>
-                        <div class="check-item" data-category="descriptions">
-                            <input type="checkbox" checked>
-                            <span>Behaviour Descriptions Match What the Code Does</span>
-                        </div>
-                        <div class="check-item" data-category="examples">
-                            <input type="checkbox" checked>
-                            <span>Code Snippets in Docs Reflect PR Changes</span>
-                        </div>
-                        <div class="check-item" data-category="examples">
-                            <input type="checkbox">
-                            <span>Example Inputs / Outputs Are Still Valid</span>
-                        </div>
-                        <div class="check-item" data-category="api">
-                            <input type="checkbox" checked>
-                            <span>API Endpoint Paths / Methods Match PR</span>
-                        </div>
-                        <div class="check-item" data-category="api">
-                            <input type="checkbox" checked>
-                            <span>Request / Response Field Names Match Code</span>
-                        </div>
-                        <div class="check-item" data-category="api">
-                            <input type="checkbox">
-                            <span>Error Codes / Messages Match Implementation</span>
-                        </div>
-                        <div class="check-item" data-category="config">
-                            <input type="checkbox">
-                            <span>Config Keys / Env Variable Names Match Code</span>
-                        </div>
-                        <div class="check-item" data-category="config">
-                            <input type="checkbox">
-                            <span>Default Values Documented Correctly</span>
-                        </div>
-                        <div class="check-item" data-category="coverage">
-                            <input type="checkbox">
-                            <span>New / Changed Functions Have Matching Doc Sections</span>
-                        </div>
-                        <div class="check-item" data-category="coverage">
-                            <input type="checkbox">
-                            <span>Deleted / Renamed Code Removed from Docs</span>
-                        </div>
-                    </div>
                 </div>
 
                 <!-- Expected Output -->
@@ -281,7 +218,7 @@
                         <div class="check-item output-item">
                             <input type="checkbox" id="out-inline" checked>
                             <span>Direct inline comments on specific lines</span>
-                            
+
                         </div>
                     </div>
                 </div>
@@ -290,6 +227,130 @@
                 <div class="panel-actions">
                     <button class="btn-primary" id="start-review-btn">Start Review</button>
                     <button class="btn-secondary" id="back-to-chat-btn">Back to Chat</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Combined Review Panel (Confluence + PR) (modal overlay) -->
+    <div class="pr-review-panel" id="combined-review-panel">
+        <div class="panel-modal">
+            <div class="panel-header review-panel-header">
+                <div class="panel-header-title-group">
+                    <h2 id="combined-review-title">Review Confluence Page with Pull Request</h2>
+                    <button type="button" class="btn-secondary btn-small" id="combined-change-mode-btn">Change mode</button>
+                </div>
+                <button class="close-btn" id="combined-review-close">&times;</button>
+            </div>
+            <div class="panel-content">
+                <!-- Confluence Page Input -->
+                <div class="form-group">
+                    <label>Confluence Page URL or ID</label>
+                    <div class="input-group">
+                        <input type="text" id="combined-confluence-link-input" placeholder="https://yoursite.atlassian.net/wiki/spaces/.../pages/12345 or page ID" class="pr-link-input">
+                    </div>
+                </div>
+
+                <!-- GitHub PR Input -->
+                <div class="form-group">
+                    <label>GitHub PR URL or ID</label>
+                    <div class="input-group">
+                        <input type="text" id="combined-pr-link-input" placeholder="https://github.com/owner/repo/pull/123 or owner/repo#123" class="pr-link-input">
+                    </div>
+                    <div class="pr-info" id="combined-info" style="display:none;">
+                        Confluence: <span id="combined-confluence-display">-</span> | PR: <span id="combined-pr-display">-</span>
+                    </div>
+                    <button class="parse-btn" id="parse-combined-btn">Parse Both</button>
+                </div>
+
+                <!-- Review Checklist -->
+                <div class="form-group">
+                    <label>Review Checklist</label>
+                    <p class="form-hint">Check the items you want reviewed.</p>
+                    <div class="checklist-controls">
+                        <button class="add-item-btn select-all-btn" id="combined-select-all-btn">Select All</button>
+                        <button class="add-item-btn deselect-all-btn" id="combined-deselect-all-btn">Deselect All</button>
+                    </div>
+
+                    <!-- Combined checklist (Confluence + PR) -->
+                    <div class="checklist-items" id="combined-checklist-items">
+                        <!-- Doc / Code Alignment -->
+                        <div class="check-item" data-category="alignment" data-check-id="doc_coverage">
+                            <input type="checkbox" checked>
+                            <span>Documentation Coverage for New / Changed Code</span>
+                        </div>
+                        <div class="check-item" data-category="alignment" data-check-id="code_examples">
+                            <input type="checkbox" checked>
+                            <span>Code Examples Match PR Changes</span>
+                        </div>
+                        <div class="check-item" data-category="alignment" data-check-id="api_signatures">
+                            <input type="checkbox" checked>
+                            <span>API / Function Signatures Up to Date</span>
+                        </div>
+                        <div class="check-item" data-category="alignment" data-check-id="config_documented">
+                            <input type="checkbox" checked>
+                            <span>Config / Env Variables Documented</span>
+                        </div>
+                        <!-- Architecture -->
+                        <div class="check-item" data-category="architecture" data-check-id="architecture_alignment">
+                            <input type="checkbox" checked>
+                            <span>Architecture / Design Alignment with PR</span>
+                        </div>
+                        <div class="check-item" data-category="architecture" data-check-id="instructions_match">
+                            <input type="checkbox">
+                            <span>Step-by-Step Instructions Match Implementation</span>
+                        </div>
+                        <!-- Error Handling & Edge Cases -->
+                        <div class="check-item" data-category="errors" data-check-id="error_handling">
+                            <input type="checkbox">
+                            <span>Error Handling &amp; Edge Cases Documented</span>
+                        </div>
+                        <!-- Deprecation -->
+                        <div class="check-item" data-category="deprecation" data-check-id="deprecated_removed">
+                            <input type="checkbox">
+                            <span>Deprecated Features / APIs Removed from Docs</span>
+                        </div>
+                        <!-- Consistency -->
+                        <div class="check-item" data-category="consistency" data-check-id="terminology_consistent">
+                            <input type="checkbox">
+                            <span>Consistent Terminology Between Code and Docs</span>
+                        </div>
+                        <!-- References -->
+                        <div class="check-item" data-category="references" data-check-id="pr_references">
+                            <input type="checkbox">
+                            <span>Links to PR / Ticket References Present</span>
+                        </div>
+                        <!-- Completeness -->
+                        <div class="check-item" data-category="completeness" data-check-id="code_path_sections">
+                            <input type="checkbox">
+                            <span>Missing Sections for Covered Code Paths</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Expected Output -->
+                <div class="form-group">
+                    <label>Expected Output</label>
+                    <p class="form-hint">Select what the review should produce:</p>
+                    <div class="output-options" id="combined-output-options">
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="combined-out-summary" checked>
+                            <span>Review Summary as footer comment on Confluence</span>
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="combined-out-inline" checked>
+                            <span>Inline comments on Confluence</span>
+                        </div>
+                        <div class="check-item output-item">
+                            <input type="checkbox" id="combined-out-pr-comments" checked>
+                            <span>Comments on GitHub PR as well</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-actions">
+                    <button class="btn-primary" id="start-combined-review-btn">Run Combined Review</button>
+                    <button class="btn-secondary" id="combined-back-to-chat-btn">Back to Chat</button>
                 </div>
             </div>
         </div>
@@ -328,7 +389,7 @@
 
 
                 <!-- Document Type -->
-                <div class="form-group">
+                <div class="form-group" id="confluence-doc-type-group">
                     <label>Document Type</label>
                     <p class="form-hint">Select the type of document for context-aware review, or leave as None.</p>
                     <select id="confluence-doc-type" class="doc-type-select">
@@ -350,8 +411,8 @@
                     <label>Review Checklist</label>
                     <p class="form-hint">Check the items you want reviewed.</p>
                     <div class="checklist-controls">
-                        <button class="add-item-btn select-all-btn" id="select-all-btn">Select All</button>
-                        <button class="add-item-btn deselect-all-btn" id="deselect-all-btn">Deselect All</button>
+                        <button class="add-item-btn select-all-btn" id="confluence-select-all-btn">Select All</button>
+                        <button class="add-item-btn deselect-all-btn" id="confluence-deselect-all-btn">Deselect All</button>
                     </div>
 
                     <!-- Confluence-only checklist (shown when mode = "confluence") -->
@@ -390,10 +451,6 @@
                         </div>
                         <div class="check-item" data-category="content">
                             <input type="checkbox">
-                            <span>Outdated Information</span>
-                        </div>
-                        <div class="check-item" data-category="content">
-                            <input type="checkbox">
                             <span>Consistent Terminology</span>
                         </div>
                         <!-- Formatting -->
@@ -412,56 +469,49 @@
                         </div>
                     </div>
 
-                    <!-- Combined (Confluence + PR) checklist (shown when mode = "combined") -->
+                    <!-- Combined checklist (shown when mode = "combined") -->
                     <div class="checklist-items" id="confluence-combined-checklist-items" style="display:none;">
-                        <!-- Doc / Code Alignment -->
-                        <div class="check-item" data-category="alignment">
+                        <div class="check-item" data-category="alignment" data-check-id="doc_coverage">
                             <input type="checkbox" checked>
                             <span>Documentation Coverage for New / Changed Code</span>
                         </div>
-                        <div class="check-item" data-category="alignment">
+                        <div class="check-item" data-category="alignment" data-check-id="code_examples">
                             <input type="checkbox" checked>
                             <span>Code Examples Match PR Changes</span>
                         </div>
-                        <div class="check-item" data-category="alignment">
+                        <div class="check-item" data-category="alignment" data-check-id="api_signatures">
                             <input type="checkbox" checked>
                             <span>API / Function Signatures Up to Date</span>
                         </div>
-                        <div class="check-item" data-category="alignment">
+                        <div class="check-item" data-category="alignment" data-check-id="config_documented">
                             <input type="checkbox" checked>
                             <span>Config / Env Variables Documented</span>
                         </div>
-                        <!-- Architecture -->
-                        <div class="check-item" data-category="architecture">
+                        <div class="check-item" data-category="architecture" data-check-id="architecture_alignment">
                             <input type="checkbox" checked>
                             <span>Architecture / Design Alignment with PR</span>
                         </div>
-                        <div class="check-item" data-category="architecture">
+                        <div class="check-item" data-category="architecture" data-check-id="instructions_match">
                             <input type="checkbox">
                             <span>Step-by-Step Instructions Match Implementation</span>
                         </div>
-                        <!-- Error Handling & Edge Cases -->
-                        <div class="check-item" data-category="errors">
+                        <div class="check-item" data-category="errors" data-check-id="error_handling">
                             <input type="checkbox">
                             <span>Error Handling &amp; Edge Cases Documented</span>
                         </div>
-                        <!-- Deprecation -->
-                        <div class="check-item" data-category="deprecation">
+                        <div class="check-item" data-category="deprecation" data-check-id="deprecated_removed">
                             <input type="checkbox">
                             <span>Deprecated Features / APIs Removed from Docs</span>
                         </div>
-                        <!-- Consistency -->
-                        <div class="check-item" data-category="consistency">
+                        <div class="check-item" data-category="consistency" data-check-id="terminology_consistent">
                             <input type="checkbox">
                             <span>Consistent Terminology Between Code and Docs</span>
                         </div>
-                        <!-- References -->
-                        <div class="check-item" data-category="references">
+                        <div class="check-item" data-category="references" data-check-id="pr_references">
                             <input type="checkbox">
                             <span>Links to PR / Ticket References Present</span>
                         </div>
-                        <!-- Completeness -->
-                        <div class="check-item" data-category="completeness">
+                        <div class="check-item" data-category="completeness" data-check-id="code_path_sections">
                             <input type="checkbox">
                             <span>Missing Sections for Covered Code Paths</span>
                         </div>
