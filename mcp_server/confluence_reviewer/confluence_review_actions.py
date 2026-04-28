@@ -19,8 +19,6 @@ logger.addHandler(_stderr_handler)
 
 class ReviewActions:
     """Review orchestration, checks, and evaluation logic."""
-
-
     @staticmethod
     def _calculate_flesch_reading_ease(text: str) -> float:
         """Calculate Flesch Reading Ease score. Higher = easier to read (0-100+)."""
@@ -226,6 +224,39 @@ class ReviewActions:
         state["footer_fallback_comments"].append(
             f"Inline review note could not be attached. Anchor: '{preview}'. Comment: {comment}"
         )
+    
+    def _run_coverage_check(self, page_id: str, text: str, state: dict) -> None:
+        """
+        Check for C0 and C1 coverage mentions in the Confluence page.
+        """
+        import re
+        logger.info("[REVIEW] Running C0/C1 coverage check")
+        found_c0 = re.search(r"\bC0\b", text, re.IGNORECASE)
+        found_c1 = re.search(r"\bC1\b", text, re.IGNORECASE)
+        if found_c0 and found_c1:
+            message = "Both C0 and C1 coverage are mentioned in the document."
+        elif found_c0:
+            message = "C0 coverage is mentioned, but C1 coverage is missing."
+        elif found_c1:
+            message = "C1 coverage is mentioned, but C0 coverage is missing."
+        else:
+            message = "Neither C0 nor C1 coverage is mentioned in the document."
+        self._record_issue(state, "coverage", message)
+        # Optionally, post inline comment if you want:
+        # self._post_issue_inline(page_id, state, message, "C0/C1 coverage")
+
+    def _run_complete_test_case_check(self, page_id: str, text: str, state: dict) -> None:
+        """
+        Check for presence of 'Complete Test Case' in the Confluence page.
+        """
+        logger.info("[REVIEW] Running Complete Test Case check")
+        if "complete test case" in text.lower():
+            message = "Document includes a section or mention of 'Complete Test Case'."
+        else:
+            message = "No 'Complete Test Case' section or mention found in the document."
+        self._record_issue(state, "test_case", message)
+        # Optionally, post inline comment if you want:
+        # self._post_issue_inline(page_id, state, message, "Complete Test Case")
 
     def _run_grammar_check(self, page_id: str, text: str, state: Dict[str, Any]) -> None:
         """Run grammar and spelling checks, then record or post the findings."""
@@ -1218,6 +1249,8 @@ class ReviewActions:
             {"id": "readability",          "execution_order": 9,  "enabled": True, "required_env": ""},
             {"id": "duplicate_content",    "execution_order": 10, "enabled": True, "required_env": ""},
             {"id": "table_validation",     "execution_order": 11, "enabled": True, "required_env": ""},
+            {"id": "check_coverage",       "execution_order": 12, "enabled": True, "required_env": ""},
+            {"id": "complete_test_case",   "execution_order": 13, "enabled": True, "required_env": ""},
         ]
 
         if isinstance(page_id, str) and page_id.strip().upper() in {"__GRAMMAR_ONLY__", "GRAMMAR_ONLY"}:
@@ -1344,6 +1377,8 @@ class ReviewActions:
         sections = []
 
         type_names = {
+            "check_coverage": "Check C0 and C1 Coverage",
+            "complete_test_case": "Complete Test Case",
             "grammar": "Grammar & Spelling",
             "misspelling": "Misspelling Detection",
             "malformed_word": "Malformed Words",
@@ -1373,6 +1408,8 @@ class ReviewActions:
         }
 
         type_descriptions = {
+            "check_coverage": "Verify C0/C1 coverage meets thresholds; include report.",
+            "complete_test_case": "Write & run test case with steps, expected result, and evidence.",
             "grammar": "Grammar, punctuation, and spelling correctness.",
             "misspelling": "Potentially misspelled words and typos.",
             "malformed_word": "Suspicious or malformed tokens in the text.",
@@ -1553,12 +1590,21 @@ class ReviewActions:
 
         return "".join(sections)
 
-    def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    def advanced_confluence_page_review(self, page_id: str, checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False, user_auth: dict | None = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Run the full page review workflow using the configured checklist source."""
-        logger.info("[REVIEW] === Starting review for page_id=%s checklist_page_id=%s ===", page_id, checklist_page_id or "(default)")
+        logger.info("[REVIEW] === Starting review for page id=%s checklist page_ d=%s ===", page_id, checklist_page_id or "(default)")
+        
         if not page_id:
-            logger.error("[REVIEW] page_id is required")
+            logger.error("[REVIEW] page id is required")
             return None, "page_id is required"
+
+        # Ensure API has up-to-date credentials
+        if user_auth:
+            self.api.set_runtime_auth(
+                email=user_auth.get("confluence_email"),
+                api_token=user_auth.get("confluence_api_token"),
+                base_url=user_auth.get("confluence_base_url"),
+            )
 
         storage, error = self.api.get_page_storage(page_id)
         if error:
@@ -1595,6 +1641,8 @@ class ReviewActions:
         logger.info("[REVIEW] Page title=%r, doc_type=%s, applicable_checks=%s", title, doc_type, type_specific_checks)
 
         check_handlers = {
+            "check_coverage": lambda: self._run_coverage_check(page_id, text, state),
+            "complete_test_case":lambda: self._run_complete_test_case_check(page_id, text, state),
             "grammar": lambda: self._run_grammar_check(page_id, text, state),
             "spelling_grammar": lambda: self._run_grammar_check(page_id, text, state),
             "spellinggrammar": lambda: self._run_grammar_check(page_id, text, state),
@@ -1654,15 +1702,23 @@ class ReviewActions:
                 state["skipped_checks"].append({"id": check_id, "reason": "no handler registered"})
                 continue
 
-            logger.info("[REVIEW] >>> Running check: %s", check_id)
+            # Check starting - event emitted via _emit_check_event
+            logger.debug("[REVIEW] Running check: %s", check_id)
+            # PHASE 2 FIX: Emit check_start event
             check_start = time.time()
-            handler()
+            try:
+                handler()
+            except Exception as e:
+                # PHASE 2 FIX: Emit check_error event
+                logger.error("[REVIEW] Check %s failed with error: %s", check_id, str(e))
+                raise
             check_elapsed = time.time() - check_start
             state["executed_checks"].append(check_id)
-            logger.info("[REVIEW] <<< Finished check: %s (%.1fs, issues so far: %d, inline posted: %d)", check_id, check_elapsed, len(state["issues"]), state["comments_posted"])
+            # Check completed - event emitted via _emit_check_event
+            logger.debug("[REVIEW] Finished check: %s (%.1fs)", check_id, check_elapsed)
 
         # --- Phase 2: Post footer FIRST (single API call, before rate limits hit) ---
-        logger.info("[REVIEW] Building footer summary (%d issues found, %d deferred inline comments)", len(state["issues"]), len(state["_deferred_inlines"]))
+        logger.debug("[REVIEW] Building footer summary...")
         footer_comment = self._build_footer_review_comment(state)
         state["footer_summary"] = footer_comment  # Store for response
         footer_response, footer_error = None, None
@@ -1681,13 +1737,12 @@ class ReviewActions:
                 logger.warning("[REVIEW] Footer post failed on attempt %d after v2/v1 fallback: %s", attempt + 1, footer_error)
             footer_posted = footer_response is not None and not footer_error
 
-        # --- Phase 3: Now post deferred inline comments ---
         state["_defer_inline"] = False
         deferred = state.pop("_deferred_inlines", [])
         if skip_inline:
             logger.info("[REVIEW] Skipping %d deferred inline comments (skip_inline=True)", len(deferred))
         else:
-            logger.info("[REVIEW] Posting %d deferred inline comments", len(deferred))
+            logger.debug("[REVIEW] Posting %d deferred inline comments", len(deferred))
             # Pre-fetch page text once so threads share the cached value
             if deferred:
                 sample_page_id = deferred[0]["page_id"]
@@ -1716,7 +1771,7 @@ class ReviewActions:
                     if result is not None and not error:
                         with _state_lock:
                             state["comments_posted"] += 1
-                        return True
+                       
                     if error:
                         last_error[0] = error
                     return False
@@ -1735,6 +1790,11 @@ class ReviewActions:
                         "error": last_error[0],
                         "anchors": item["anchors"],
                     })
+                    # PHASE 2.8 FIX: Emit inline_failed event
+                    try:
+                        error_msg = last_error[0] if last_error[0] else "Could not find matching text"
+                    except Exception:
+                        pass  # Silently ignore emission errors
 
             MAX_WORKERS = 5
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

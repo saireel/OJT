@@ -16,6 +16,10 @@ _stderr_handler = logging.StreamHandler()
 _stderr_handler.setLevel(logging.INFO)
 _stderr_handler.setFormatter(logging.Formatter("%(message)s"))
 logger.addHandler(_stderr_handler)
+
+
+
+
 from typing import Any, Protocol, Pattern
 from requests.exceptions import HTTPError
 
@@ -45,7 +49,6 @@ class _GitHubReviewDeps(Protocol):
     ) -> Any: ...
     def add_comment(self, repo: str, pr_number: int, comment_text: str) -> Any: ...
     def fetch_review_instructions(self, repo: str, ref: str = "main") -> dict[str, Any]: ...
-    def check_flake8_compliance(self, repo: str, head_sha: str, files: list[dict[str, Any]]) -> dict[str, Any]: ...
     def check_consistency(self, repo: str, head_sha: str, files: list[dict[str, Any]]) -> dict[str, Any]: ...
     def get_cached_pr_title(self, repo: str, pr_number: int) -> str: ...
 
@@ -53,92 +56,6 @@ class GitHubReviewActions:
     _INSTRUCTION_FILENAME_PATTERN = re.compile(
         r"(?i)^(?:review[-_ ]?instructions?|review[-_ ]?checklist|copilot[-_ ]?instructions|pull[-_ ]?request[-_ ]?checklist)(?:\.md|\.txt)?$"
     )
-
-    def check_flake8_compliance(self: "_GitHubReviewDeps", repo: str, head_sha: str, files: list) -> dict:
-            """
-            Check Python files in the PR for flake8 compliance (PEP 8, naming, complexity).
-            Writes all .py files to a temp directory and runs flake8 once.
-            """
-            import subprocess
-            import sys
-            import tempfile
-            import os
-            import shutil
-
-            python_files = [f["filename"] for f in files if f["filename"].endswith(".py")]
-            if not python_files:
-                return {"compliant": True, "violations_count": 0, "violations": []}
-
-            violations = []
-            tmpdir = tempfile.mkdtemp(prefix="flake8_review_")
-            path_map = {}
-
-            try:
-                for py_file in python_files:
-                    try:
-                        content = self.get_file_content_at_ref(repo, py_file, head_sha)
-                        if not content:
-                            continue
-                        safe_name = py_file.replace("/", "_").replace("\\", "_")
-                        tmp_path = os.path.join(tmpdir, safe_name)
-                        with open(tmp_path, "w", encoding="utf-8") as f:
-                            f.write(content)
-                        path_map[tmp_path] = py_file
-                    except Exception as e:
-                        logger.info("[REVIEW] Warning: Could not fetch %s: %s", py_file, e)
-
-                if not path_map:
-                    return {"compliant": True, "violations_count": 0, "violations": []}
-
-                # Use sys.executable -m flake8 to avoid PATH issues in subprocess envs
-                cmd = [sys.executable, "-m", "flake8", "--max-line-length=120"] + list(path_map.keys())
-                proc = None
-                try:
-                    proc = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, cwd=tmpdir,
-                    )
-                    stdout, stderr = proc.communicate(timeout=30)
-                except subprocess.TimeoutExpired:
-                    if proc is not None:
-                        proc.kill()
-                        proc.communicate()
-                    logger.info("[REVIEW] Flake8 timed out after 30s — skipping flake8 check")
-                    return {"compliant": False, "violations_count": 0, "violations": [],
-                            "skipped": True, "skip_reason": "flake8 timed out"}
-
-                for line in stdout.strip().split("\n"):
-                    if not line or ":" not in line:
-                        continue
-                    parts = line.split(":")
-                    if len(parts) < 4:
-                        continue
-                    try:
-                        tmp_path_out = parts[0]
-                        line_no = int(parts[1])
-                        col = int(parts[2])
-                        msg_part = ":".join(parts[3:]).strip()
-                        code_parts = msg_part.split(" ")
-                        code = code_parts[0] if code_parts else "UNKNOWN"
-                        message = " ".join(code_parts[1:]) if len(code_parts) > 1 else msg_part
-                        original_file = path_map.get(tmp_path_out, tmp_path_out)
-                        violations.append({
-                            "file": original_file,
-                            "line": line_no,
-                            "col": col,
-                            "code": code,
-                            "message": message,
-                        })
-                    except (ValueError, IndexError):
-                        pass
-            finally:
-                shutil.rmtree(tmpdir, ignore_errors=True)
-
-            return {
-                "compliant": len(violations) == 0,
-                "violations_count": len(violations),
-                "violations": violations[:50],
-            }
 
     def check_consistency(self: "_GitHubReviewDeps", repo: str, head_sha: str, files: list) -> dict:
             """
@@ -282,7 +199,6 @@ class GitHubReviewActions:
             """
             Review a single pull request based on the provided checklist.
             Behavior:
-            - Runs flake8 on changed Python files.
             - Runs cross-file consistency checks.
             - Reviews universal coding conventions in changed source files.
             - Groups and caps inline comments to reduce PR noise.
@@ -333,22 +249,23 @@ class GitHubReviewActions:
                     "reviewed_items": [],
                 }
 
-            if "python_flake8" in enabled_ids:
-                flake8_results = self.check_flake8_compliance(repo, head_sha, files)
-            else:
-                flake8_results = {"compliant": True, "violations_count": 0, "violations": []}
-                logger.info("[REVIEW] Flake8 skipped (not selected in checklist)")
-            flake8_count = flake8_results.get("violations_count", 0)
-
             if "cross_file_consistency" in enabled_ids:
-                consistency_results = self.check_consistency(repo, head_sha, files)
+                try:
+                    consistency_results = self.check_consistency(repo, head_sha, files)
+                    consistency_count = consistency_results.get("total_issues", 0)
+                except Exception as e:
+                    raise
             else:
                 consistency_results = {"total_issues": 0, "issues": []}
                 logger.info("[REVIEW] Consistency checks skipped (not selected in checklist)")
-            consistency_count = consistency_results.get("total_issues", 0)
+                consistency_count = 0
+            consistency_count = consistency_results.get("total_issues", consistency_count)
 
-            convention_results = self.check_universal_coding_conventions(repo, head_sha, files, enabled_ids)
-            convention_count = convention_results["total_issues"]
+            try:
+                convention_results = self.check_universal_coding_conventions(repo, head_sha, files, enabled_ids)
+                convention_count = convention_results["total_issues"]
+            except Exception as e:
+                raise
 
             def _infer_finding_severity(message: str, default: str = "Medium") -> str:
                 normalized = str(message or "").lower()
@@ -377,30 +294,7 @@ class GitHubReviewActions:
 
             logger.info("[REVIEW] Preparing inline comments...")
             raw_inline_candidates: list[dict[str, Any]] = []
-            for violation in flake8_results.get("violations", []):
-                violation_file = str(violation.get("file", "unknown"))
-                violation_line = _safe_line_number(violation.get("line", 1))
-                violation_code = str(violation.get("code", "Flake8")).strip() or "Flake8"
-                violation_message = str(violation.get("message", "Style or lint issue detected.")).strip()
-                issue_title = f"Flake8 {violation_code} in {violation_file}:{violation_line}"
-                explanation = (
-                    f"{violation_message}. This was flagged by Flake8 during PR validation and should be corrected before merge."
-                )
-                suggestion = (
-                    f"Update the code at {violation_file}:{violation_line} to satisfy Flake8 {violation_code} and keep the file compliant with repository standards."
-                )
-                raw_inline_candidates.append({
-                    "file": violation_file,
-                    "line": violation_line,
-                    "body": _build_structured_finding_comment(
-                        issue=issue_title,
-                        explanation=explanation,
-                        suggestion=suggestion,
-                        severity=_infer_finding_severity(violation_message, default="Medium"),
-                    ),
-                    "source": "flake8",
-                    "priority": 0,
-                })
+            
             for issue in convention_results.get("issues", []):
                 issue_file = str(issue.get("file", "unknown"))
                 issue_line = _safe_line_number(issue.get("line", 1))
@@ -547,10 +441,9 @@ class GitHubReviewActions:
                 item["name"] for item in enabled_items
             ]
 
-            total_findings = flake8_count + consistency_count + convention_count
+            total_findings = consistency_count + convention_count
             show_all_general_findings = bool(skip_inline)
 
-            flake8_violations = list(flake8_results.get("violations", []) or [])
             consistency_issues = list(consistency_results.get("issues", []) or [])
             if not consistency_issues and consistency_count > 0:
                 for item in list(consistency_results.get("spelling_variations", []) or []):
@@ -583,13 +476,6 @@ class GitHubReviewActions:
 
             convention_issues = list(convention_results.get("issues", []) or [])
 
-            def _format_flake8_item(violation: dict) -> str:
-                file_name = str(violation.get("file", "unknown"))
-                line_no = violation.get("line", "?")
-                code = str(violation.get("code", "")).strip()
-                message = str(violation.get("message", "")).strip()
-                return f"- {file_name}:{line_no} {code} {message}".rstrip()
-
             def _format_issue_item(issue: dict) -> str:
                 file_name = str(issue.get("file", "unknown")).strip()
                 line_no = str(issue.get("line", "?")).strip()
@@ -603,7 +489,7 @@ class GitHubReviewActions:
                     "This pull request is in good overall condition and passed all review checks. "
                     "The code appears clean, readable, and compliant with configured standards."
                 )
-            elif total_findings <= 2 and flake8_count == 0:
+            elif total_findings <= 2 == 0:
                 executive_summary = (
                     "This pull request is in good overall condition and passed most review checks. "
                     "No linting issues were found; only minor consistency findings were detected."
@@ -621,7 +507,6 @@ class GitHubReviewActions:
                 else "Inline review comments were posted where possible, and key findings are summarized below."
             )
 
-            flake8_status = "Passed" if flake8_count == 0 else "Completed with Findings"
             convention_status = "Passed" if convention_count == 0 else "Completed with Findings"
             consistency_status = "Passed" if consistency_count == 0 else "Completed with Findings"
 
@@ -640,13 +525,6 @@ class GitHubReviewActions:
                 f"Findings Detected: {total_findings}",
                 "",
                 "**Validation Results**",
-                "",
-                "**Python Flake8 Compliance**",
-                "",
-                f"Status: {flake8_status}",
-                f"Issues Found: {flake8_count}",
-                "",
-                "No Flake8 violations detected." if flake8_count == 0 else "Flake8 issues were detected and should be addressed.",
                 "",
                 "**Universal Naming Conventions**",
                 "",
@@ -699,16 +577,6 @@ class GitHubReviewActions:
                 summary_lines.append("")
                 summary_lines.append("**Detailed Finding**" if total_findings == 1 else "**Detailed Findings**")
 
-                if flake8_violations:
-                    flake8_to_show = flake8_violations if show_all_general_findings else flake8_violations[:15]
-                    summary_lines.append("")
-                    summary_lines.append(f"**Flake8 ({flake8_count})**")
-                    for violation in flake8_to_show:
-                        summary_lines.append(_format_flake8_item(violation))
-                    hidden = flake8_count - len(flake8_to_show)
-                    if hidden > 0:
-                        summary_lines.append(f"- ... and {hidden} more flake8 finding(s).")
-
                 if consistency_issues:
                     consistency_to_show = consistency_issues if show_all_general_findings else consistency_issues[:20]
                     summary_lines.append("")
@@ -748,8 +616,6 @@ class GitHubReviewActions:
                     summary_lines.append("Use a consistent convention based on context:")
                     summary_lines.append("- API for comments, documentation, labels, and constants")
                     summary_lines.append("- api for Python snake_case variables and function names")
-                if flake8_count > 0:
-                    summary_lines.append("Address the listed Flake8 issues to keep style compliance high.")
                 if convention_count > 0:
                     summary_lines.append("Resolve naming/documentation/comment convention findings for consistency.")
                 if consistency_count > 0 and not api_variants:
@@ -766,7 +632,6 @@ class GitHubReviewActions:
                 "pr_title": pr_title,
                 "files_changed": len(files),
                 "checklist_items": len(enabled_items),
-                "flake8_violations": flake8_count,
                 "consistency_issues": consistency_count,
                 "convention_issues": convention_count,
                 "inline_comments_posted": inline_posted,

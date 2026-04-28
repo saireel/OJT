@@ -43,7 +43,6 @@ _PANEL_TO_CHECKLIST_MAP = {
     "Proper Error Handling":            {"id": "error_handling", "description": "Check for proper error handling patterns."},
     "Edge Cases Covered":               {"id": "edge_cases", "description": "Check for unhandled edge cases."},
     # style
-    "Flake8 / ESLint Compliance":       {"id": "python_flake8", "description": "Run flake8/ESLint compliance checks."},
     "Consistent Formatting / Indentation": {"id": "consistent_formatting", "description": "Check for consistent formatting and indentation."},
     # testing
     "Test Coverage for New Code":       {"id": "test_coverage", "description": "Check that new code has test coverage."},
@@ -132,7 +131,7 @@ def _step_budget_for_request(user_msg: str) -> int:
     text = (user_msg or "").lower()
     fast_keywords = ["spell", "spelling", "grammar", "typo", "inline comment"]
     if any(keyword in text for keyword in fast_keywords):
-        return min(8, MAX_AGENT_STEPS)
+        return min(10, MAX_AGENT_STEPS)
     return MAX_AGENT_STEPS
 
 def _extract_confluence_page_ids_from_text(text: str) -> list[str]:
@@ -285,6 +284,8 @@ def _build_fast_review_response(target_page_id: str, elapsed_ms: int) -> str:
 
 def _try_fast_confluence_spelling_review(user_msg: str, history: list, page_ids: list[str]) -> str | None:
     """Bypass the agent loop for short spelling-only Confluence tasks."""
+    # PHASE 4 FIX: Disable fast path to use agent loop for consistent "Progress:" formatting
+    return None
     if not page_ids:
         return None
     recent_text = _recent_user_text(history)
@@ -414,14 +415,7 @@ def _build_universal_pr_review_checklist() -> list[dict]:
             "description": "Review changed files for inconsistent terminology, metrics, or formatting.",
             "enabled": True,
             "execution_order": 40,
-        },
-        {
-            "id": "python_flake8",
-            "name": "Python Flake8 Compliance",
-            "description": "Review changed Python files for flake8 violations.",
-            "enabled": True,
-            "execution_order": 50,
-        },
+        }
     ]
 
 def _looks_like_secret_assignment(line: str) -> bool:
@@ -789,6 +783,9 @@ def _run_review_with_coalescing(review_key: tuple, runner):
 
 # Maps Confluence panel checklist labels to check IDs (normalized to lowercase)
 _CONFLUENCE_PANEL_CHECK_MAP = {
+    "missing sections / incomplete content": "empty_section",
+    "complete test case": "complete_test_case",
+    "check c0 and c1 coverage": "check_coverage",
     "consistent formatting / indentation": "consistent_formatting",
     "cross-file consistency": "cross_file_consistency",
     "spelling & grammar": "spelling_grammar",
@@ -799,7 +796,8 @@ _CONFLUENCE_PANEL_CHECK_MAP = {
     "broken / missing links": "citation",
     "consistent terminology": "consistency_checks",
     "consistent formatting": "formatting",
-    "missing sections / incomplete content": "empty_section",
+
+
 
 }
 # Migrated from website/app.py.bak

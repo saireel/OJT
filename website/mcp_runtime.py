@@ -312,7 +312,8 @@ def call_llm(prompt: str) -> tuple[str, str | None]:
 def _call_tool_with_runtime_auth(tool_name: str, args: dict):
     payload = dict(args or {})
 
-    raw_override_auth = payload.pop("__user_auth", None)
+    # Keep __user_auth in payload for MCP tool functions to receive it
+    raw_override_auth = payload.get("__user_auth", None)  # Use .get() instead of .pop()
     if isinstance(raw_override_auth, dict):
         # Only treat __user_auth as an override when caller provided explicit values.
         has_explicit_override = any(
@@ -333,7 +334,7 @@ def _call_tool_with_runtime_auth(tool_name: str, args: dict):
 
     runtime_auth = override_auth or get_active_user_auth()
 
-    # Extract base URLs if provided
+    # Extract base URLs if provided (still pop these as they're transport-only)
     github_base_url = payload.pop("__github_base_url", None)
     confluence_base_url = payload.pop("__confluence_base_url", None)
 

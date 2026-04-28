@@ -17,6 +17,24 @@ if TYPE_CHECKING:
     from mcp_server.mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
     from .agent_engine import _clean_review_line, run_agent
 
+
+def clean_summary_for_display(text):
+    """Clean raw markdown summary for better UI display."""
+    import re
+    if not text or not isinstance(text, str):
+        return ""
+    # Remove markdown pipes/table formatting
+    text = text.replace('|', '')
+    # Remove extra dashes (markdown table separators)  
+    text = re.sub(r'-{3,}', '', text)
+    # Clean up extra whitespace
+    text = re.sub(r'\n\s*\n', '\n', text)
+    text = re.sub(r' +', ' ', text)
+    # Limit length
+    if len(text) > 600:
+        text = text[:600].rsplit(' ', 1)[0] + "..."
+    return text.strip()
+
 def register_routes(app):
     # Lazy imports to avoid heavy module loading at import time
     def _lazy_imports():
@@ -490,7 +508,7 @@ def register_routes(app):
                 yield send_event("progress", f"File listing warning: {e}", level="warning")
                 file_list = []
             # --- Step 2: Run the full review tool in a background thread ---
-            yield send_event("progress", "Running checklist analysis (flake8, conventions, consistency)...")
+            yield send_event("progress", "Running checklist analysis (conventions, consistency)...")
             yield send_event("progress", "This step analyzes all files and posts comments — please wait...")
 
             result_queue = queue.Queue()
@@ -630,7 +648,6 @@ def register_routes(app):
                 data_r = result.get("data", {})
                 summary = data_r.get("summary", "") if isinstance(data_r, dict) else str(data_r)
                 reviewed = data_r.get("reviewed_items", []) if isinstance(data_r, dict) else []
-                flake8_v = data_r.get("flake8_violations", 0) if isinstance(data_r, dict) else 0
                 conv_v = data_r.get("convention_issues", 0) if isinstance(data_r, dict) else 0
                 consist_v = data_r.get("consistency_issues", 0) if isinstance(data_r, dict) else 0
                 inline_posted = data_r.get("inline_comments_posted", 0) if isinstance(data_r, dict) else 0
@@ -640,8 +657,6 @@ def register_routes(app):
                 yield send_event("progress", f"\u2705 Review complete in {elapsed_s:.1f}s")
                 if reused_inflight:
                     yield send_event("progress", f"  Reused in-flight result for duplicate request (waited {waited_s:.1f}s)")
-                if flake8_v > 0:
-                    yield send_event("progress", f"  Flake8 violations: {flake8_v}")
                 if conv_v > 0:
                     yield send_event("progress", f"  Convention issues: {conv_v}")
                 if consist_v > 0:
@@ -655,7 +670,7 @@ def register_routes(app):
                 if reviewed:
                     lines.append(f"Reviewed: {', '.join(reviewed)}")
                 if summary:
-                    lines.append(summary)
+                    lines.append(clean_summary_for_display(summary))
                 else:
                     lines.append("Review comments (inline + summary) have been posted to the PR.")
                 yield send_event("done", "\n".join(lines))
@@ -883,7 +898,7 @@ def register_routes(app):
                     skipped_text = ", ".join(f"{item.get('id', 'unknown')} ({item.get('reason', 'skipped')})" for item in skipped_checks[:5])
                     lines.append("Skipped checks: " + skipped_text + ".")
                 if summary:
-                    lines.append(summary)
+                    lines.append(clean_summary_for_display(summary))
                 yield send_event("done", "\n".join(lines))
             else:
                 error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
@@ -1167,7 +1182,7 @@ def register_routes(app):
                         yield send_event("progress", f"  Checks run: {total_checks}")
                         yield send_event("progress", f"  Non-compliant checks: {non_compliant}")
 
-                    summary_text = str(result.get("summary") or "Combined review complete.")
+                    summary_text = clean_summary_for_display(result.get("summary") or "Combined review complete.")
                     posted_targets = result.get("footer_targets", []) if isinstance(result.get("footer_targets"), list) else []
                     comments_posted = int(result.get("comments_posted", 0) or 0)
                     if posted_targets:

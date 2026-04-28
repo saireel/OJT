@@ -178,10 +178,6 @@
                         </div>
                         <div class="check-item" data-category="style">
                             <input type="checkbox" checked>
-                            <span>Flake8 / ESLint Compliance</span>
-                        </div>
-                        <div class="check-item" data-category="style">
-                            <input type="checkbox" checked>
                             <span>Consistent Formatting / Indentation</span>
                         </div>
                         <div class="check-item" data-category="testing">
@@ -417,6 +413,19 @@
 
                     <!-- Confluence-only checklist (shown when mode = "confluence") -->
                     <div class="checklist-items" id="confluence-only-checklist-items" style="display:none;">
+                        <!-- Completeness -->
+                        <div class="check-item" data-category="completeness">
+                            <input type="checkbox">
+                            <span>Missing Sections / Incomplete Content</span>
+                        </div>
+                        <div class="check-item" data-category="completeness">
+                            <input type="checkbox">
+                            <span>Complete Test Case </span>
+                        </div>
+                         <div class="check-item" data-category="completeness">
+                            <input type="checkbox">
+                            <span>Check C0 and C1 coverage </span>
+                        </div>
                         <!-- Spelling & Grammar -->
                         <div class="check-item" data-category="spelling">
                             <input type="checkbox" checked>
@@ -457,19 +466,6 @@
                         <div class="check-item" data-category="formatting">
                             <input type="checkbox">
                             <span>Consistent Formatting</span>
-                        </div>
-                        <div class="check-item" data-category="formatting">
-                            <input type="checkbox">
-                            <span>Proper Use of Code Blocks</span>
-                        </div>
-                        <!-- Completeness -->
-                        <div class="check-item" data-category="completeness">
-                            <input type="checkbox">
-                            <span>Missing Sections / Incomplete Content</span>
-                        </div>
-                        <div class="check-item" data-category="completeness">
-                            <input type="checkbox">
-                            <span>Complete Test Case</span>
                         </div>
                     </div>
                 </div>
@@ -703,7 +699,7 @@
                 </ol>
 
                 <div class="help-cta-row">
-                    <button class="btn-primary" id="start-tour-btn" type="button">Start Interactive Tour</button>
+                   
                     <a class="btn-secondary help-guide-link" href="/quick-user-guide">Open Full User Guide</a>
                 </div>
             </div>

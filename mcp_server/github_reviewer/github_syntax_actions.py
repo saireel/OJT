@@ -4,11 +4,26 @@ import ast
 import base64
 import difflib
 import re
+from typing import TYPE_CHECKING, Any, Protocol
 
 import requests
 from requests.exceptions import HTTPError
 
+if TYPE_CHECKING:
+    from .github_review_actions import _GitHubReviewDeps
+
 class GitHubSyntaxActions:
+    """
+    Mixin class for GitHub syntax and convention checks.
+    Expects to be mixed with a class that implements _GitHubReviewDeps protocol.
+    """
+    
+    # Type hint for attributes provided by the mixin partner
+    if TYPE_CHECKING:
+        _base_url: str
+        _headers: dict[str, str]
+        def get_file_content_at_ref(self, repo: str, file_path: str, ref: str) -> str: ...
+    
     @staticmethod
     def _identifier_words(identifier: str) -> set[str]:
             """Split an identifier into lowercase lexical tokens for heuristic comparisons."""

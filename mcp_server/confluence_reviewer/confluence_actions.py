@@ -73,15 +73,20 @@ class ConfluenceAPI:
     def _request(self, method: str, endpoint: str, **kwargs) -> Tuple[Optional[requests.Response], Optional[str]]:
         """Send a Confluence API request and return either the response or an error message."""
         if not self.base_url:
+            logger.error("_request: BASE_URL NOT CONFIGURED")
             return None, "Confluence base URL is not configured. Set it in Account Setup."
         if not self.email or not self.api_token:
+            logger.error("_request: CREDENTIALS NOT SET - email=%s, token=%s", bool(self.email), bool(self.api_token))
             return None, "Confluence credentials are not configured. Set email and API token in Account Setup."
         if not endpoint.startswith("/"):
             endpoint = "/" + endpoint
         url = f"{self.base_url}{endpoint}"
+        logger.debug("[API] Sending %s request to %s", method, endpoint)
         try:
             response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            logger.debug("[API] Response status: %d", response.status_code)
             response.raise_for_status()
+            logger.info("[API] SUCCESS - %s %s returned %d", method, endpoint, response.status_code)
             return response, None
         except requests.RequestException as e:
             detail = ""
@@ -89,11 +94,12 @@ class ConfluenceAPI:
             if response is not None:
                 try:
                     body = (response.text or "").strip()
+                    logger.error("[API] ERROR - Status %d, body: %s", response.status_code, body[:200])
                     if body:
                         detail = f" | response: {body[:500]}"
                 except Exception:
                     detail = ""
-            logger.error(f"Request failed: {e}{detail}")
+            logger.error("[API] Request failed: %s %s - %s%s", method, endpoint, str(e), detail)
             return None, f"{e}{detail}"
 
     # Spaces
@@ -141,12 +147,19 @@ class ConfluenceAPI:
         )
 
         if error or response is None:
+            logger.error(f"[PAGE_STORAGE] Error fetching page {page_id}: {error}")
             return None, error
 
         try:
-            storage = response.json().get("body", {}).get("storage", {}).get("value", "")
+            json_data = response.json()
+            logger.debug(f"[PAGE_STORAGE] Response keys: {json_data.keys() if isinstance(json_data, dict) else type(json_data)}")
+            storage = json_data.get("body", {}).get("storage", {}).get("value", "")
+            logger.debug(f"[PAGE_STORAGE] Storage length: {len(storage)} chars")
+            if not storage:
+                logger.warning(f"[PAGE_STORAGE] Page {page_id} returned empty storage. Full response: {json_data}")
             return storage, None
         except Exception as e:
+            logger.error(f"[PAGE_STORAGE] Failed to parse storage for page {page_id}: {e}")
             return None, f"Failed to parse storage content: {e}"
 
     def _get_document_title(self, page_id: str) -> Optional[str]:
@@ -221,10 +234,14 @@ class ConfluenceAPI:
 
     def post_footer_comment(self, page_id: str, comment: str) -> Tuple[Optional[requests.Response], Optional[str]]:
         """Post a footer comment to the target Confluence page, trying v2 first then v1."""
+        logger.info("[FOOTER_API] Starting post_footer_comment for page_id=%s", page_id)
+        
         if not page_id or not comment:
+            logger.error("[FOOTER_API] Missing required params: page_id=%s, comment=%s", page_id, bool(comment))
             return None, "page_id and comment are required"
 
         html_comment = self._markdown_to_confluence_html(comment)
+        logger.debug("[FOOTER_API] Converted comment to HTML, length=%d", len(html_comment))
 
         resolved_page_id = int(page_id) if str(page_id).isdigit() else page_id
         v2_data = {
@@ -234,8 +251,10 @@ class ConfluenceAPI:
                 "value": html_comment,
             },
         }
+        logger.debug("[FOOTER_API] Attempting v2 API call with pageId=%s", resolved_page_id)
         response, error = self._request("POST", "/api/v2/footer-comments", json=v2_data)
         if response is not None and not error:
+            logger.info("[FOOTER_API] v2 SUCCESS - Status %d", response.status_code)
             return response, None
 
         logger.warning("Footer comment v2 failed for page %s, trying v1 content fallback: %s", page_id, error)

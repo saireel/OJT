@@ -17,7 +17,6 @@ const prDisplay = document.getElementById("pr-display");
 const checklistItems = document.getElementById("checklist-items");
 const selectAllBtn = document.getElementById("select-all-btn");
 const deselectAllBtn = document.getElementById("deselect-all-btn");
-const fastModeToggle = document.getElementById("fast-mode-toggle");
 const maxInlineCommentsInput = document.getElementById("max-inline-comments");
 const groupSimilarInlineInput = document.getElementById("group-similar-inline");
 const prPanelModal = prReviewPanel ? prReviewPanel.querySelector(".panel-modal") : null;
@@ -197,11 +196,7 @@ function formatAuthHistoryLabel(entry) {
 
 var quickReviewMode = "combined";
 
-function getReviewPanelTitle(mode) {
-    if (mode === "pr") return "GitHub PR Review";
-    if (mode === "confluence") return "Confluence Page Review";
-    return "Review Confluence Page with a Pull Request";
-}
+// Titles now come from SSE events - initializeStreamProgress sets them dynamically
 
 function syncQuickReviewCardSelection(mode) {
     var selectedMode = mode || quickReviewMode || "combined";
@@ -270,11 +265,17 @@ function setQuickReviewMode(mode) {
     }
 
     syncConfluenceChecklistVisibility(quickReviewMode);
+    
+    // Show/hide PR checklist items based on mode
+    var prOnlyList = document.getElementById("pr-only-checklist-items");
+    if (prOnlyList) {
+        prOnlyList.style.display = (quickReviewMode === "pr") ? "" : "none";
+    }
     if (confluenceReviewTitle) {
-        confluenceReviewTitle.textContent = getReviewPanelTitle(quickReviewMode);
+        // Title set by SSE from backend
     }
     if (prReviewTitle) {
-        prReviewTitle.textContent = getReviewPanelTitle("pr");
+        // Title set by SSE from backend
     }
     if (quickReviewCombined) quickReviewCombined.checked = quickReviewMode === "combined";
     if (quickReviewConfluence) quickReviewConfluence.checked = quickReviewMode === "confluence";
@@ -464,6 +465,13 @@ function createReviewProgressTracker() {
 
 const reviewProgress = createReviewProgressTracker();
 
+// === CENTRALIZED SSE PROGRESS HANDLER ===
+const initializeStreamProgress = function(typingBubbleToRemove, title, initialMessage) {
+    removeTypingBubble(typingBubbleToRemove);
+    reviewProgress.show(title || "Assistant progress", initialMessage || "Starting request analysis...");
+    reviewProgress.setState("running");
+};
+
 setInterval(function() {
     reviewProgress.updateTimer();
 }, 1000);
@@ -644,6 +652,23 @@ function createAssistantMessageBubble(text) {
     return bubble;
 }
 
+function createTypingBubble() {
+    const bubble = document.createElement("div");
+    bubble.className = "msg bot";
+    bubble.innerHTML = '<div class="msg-inner"><div class="msg-time"></div><div class="msg-body"><span class="loading-cursor">|</span></div></div>';
+    bubble.querySelector(".msg-time").textContent = currentChatTimestamp();
+    chat.appendChild(bubble);
+    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+    return bubble;
+}
+
+function removeTypingBubble(bubble) {
+    if (bubble && bubble.parentElement) {
+        bubble.remove();
+    }
+}
+
+
 function getLocalFastSmalltalkReply(text) {
     const normalized = String(text || "")
         .toLowerCase()
@@ -697,42 +722,7 @@ function streamText(textEl, cursorEl, text, speed = 8) {
 
     step();
 }
-function createTypingIndicator() {
-    const bubble = document.createElement("div");
-    bubble.className = "msg bot typing";
-    bubble.innerHTML = `<div class="msg-inner"><div class="msg-body"><div class="typing-indicator"><span></span><span></span><span></span></div></div></div>`;
-    chat.appendChild(bubble);
-    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
-    return bubble;
-}
 
-// --- TYPING (3 dots) ---
-function createTypingBubble() {
-    const bubble = document.createElement("div");
-    bubble.className = "msg bot typing-bubble";
-
-    bubble.innerHTML = `
-        <div class="msg-inner">
-            <div class="msg-time">${currentChatTimestamp()}</div>
-            <div class="msg-body">
-                <span class="dot"></span>
-                <span class="dot"></span>
-                <span class="dot"></span>
-            </div>
-        </div>
-    `;
-
-    chat.appendChild(bubble);
-    chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
-
-    return bubble;
-}
-
-function removeTypingBubble(bubble) {
-    if (bubble && bubble.parentNode) {
-        bubble.remove();
-    }
-}
 
 // --- PR Review Panel ---
 prReviewBtn.addEventListener("click", function() {
@@ -786,7 +776,6 @@ if (deselectAllBtn) {
     });
 }
 
-
 // Start Review - builds prompt and sends to chat
 startReviewBtn.addEventListener("click", function() {
     var prLink = prLinkInput.value.trim();
@@ -829,183 +818,32 @@ startReviewBtn.addEventListener("click", function() {
         msg += "\n\nChecklist items to review:\n- " + checklist.join("\n- ");
     }
 
-    msg += "\n\nReview tuning:";
-    msg += "\n- Operating mode: Strict / High-Confidence";
-    msg += "\n- Max inline comments: " + maxInlineComments;
-    msg += "\n- Group similar inline: " + (groupSimilarInline ? "Yes" : "No");
-
     prReviewPanel.style.display = "none";
     mainChat.style.display = "flex";
     sidebar.style.display = "";
     prLinkInput.value = "";
     prInfo.style.display = "none";
 
-    createUserMessageBubble(msg);
-
-    chatHistory.push({role: "user", text: msg});
-    requestHint.textContent = "Sending request...";
-    requestHint.style.color = "#666";
-
-    reviewProgress.show("GitHub PR review", "Starting review...");
-
-    (async function() {
-        try {
-            var res = await fetch("/api/review-stream", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory, checklist: checklist, outputs: outputs, fast_mode: fastMode, max_inline_comments: maxInlineComments, group_similar_inline: groupSimilarInline, github_base_url: githubBaseUrl}))
-            });
-
-            if (!res.ok || !res.body) {
-                reviewProgress.addLog("Streaming unavailable, using direct review...");
-                var res2 = await fetch("/api/chat", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
-                });
-                var data2 = await res2.json();
-                var resp = data2.response || data2.error || "No response";
-                var fallbackFailed = !res2.ok || !!data2.error || isErrorLikeText(resp);
-                if (fallbackFailed) {
-                    var fallbackErr = toActionableErrorMessage(extractErrorMessage(data2, resp));
-                    markConnectionStatusFromError(fallbackErr);
-                    reviewProgress.addLog("Error: " + fallbackErr, "error");
-                    reviewProgress.setTitle("Review failed");
-                    reviewProgress.setState("error");
-                    requestHint.textContent = "Review failed";
-                    requestHint.style.color = "#d32f2f";
-                    chatHistory.push({role: "assistant", text: fallbackErr});
-                    createAssistantMessageBubble(fallbackErr);
-                    return;
-                }
-                reviewProgress.addLog("OK " + resp.split("\n")[0], "success");
-                reviewProgress.setTitle("Review complete");
-                reviewProgress.setState("success");
-                reviewProgress.hide();
-                chatHistory.push({role: "assistant", text: resp});
-                requestHint.textContent = "Review complete";
-                requestHint.style.color = "#2e7d32";
-                return;
-            }
-
-            var reader = res.body.getReader();
-            var decoder = new TextDecoder();
-            var buffer = "";
-            var finalMessage = "";
-            var sawDoneEvent = false;
-            var sawErrorEvent = false;
-
-            while (true) {
-                var chunk = await reader.read();
-                if (chunk.done) break;
-                buffer += decoder.decode(chunk.value, {stream: true});
-
-                var parts = buffer.split("\n\n");
-                buffer = parts.pop();
-
-                for (var i = 0; i < parts.length; i++) {
-                    var part = parts[i].trim();
-                    if (!part.startsWith("data: ")) continue;
-                    try {
-                        var evt = JSON.parse(part.substring(6));
-                        if (evt.type === "progress") {
-                            reviewProgress.addLog(evt.message);
-                            requestHint.textContent = evt.message;
-                            requestHint.style.color = "#666";
-                        } else if (evt.type === "done") {
-                            finalMessage = evt.message || "";
-                            sawDoneEvent = true;
-                            if (!sawErrorEvent && !isErrorLikeText(finalMessage)) {
-                                reviewProgress.addLog(finalMessage || "Review completed.", "success");
-                                reviewProgress.setTitle("Review complete");
-                                reviewProgress.setState("success");
-                                reviewProgress.hide();
-                                requestHint.textContent = "Review complete";
-                                requestHint.style.color = "#2e7d32";
-                            } else {
-                                finalMessage = toActionableErrorMessage(finalMessage || "Review failed during streaming.");
-                                sawErrorEvent = true;
-                                markConnectionStatusFromError(finalMessage);
-                                reviewProgress.addLog(finalMessage, "error");
-                                reviewProgress.setTitle("Review failed");
-                                reviewProgress.setState("error");
-                                requestHint.textContent = "Review failed";
-                                requestHint.style.color = "#d32f2f";
-                            }
-                        } else if (evt.type === "error") {
-                            if (String(evt.level || "").toLowerCase() === "warning") {
-                                var warningMessage = toActionableErrorMessage(evt.message || "Warning");
-                                reviewProgress.addLog(warningMessage, "warning");
-                                requestHint.textContent = "Completed with warnings";
-                                requestHint.style.color = "#b26a00";
-                            } else {
-                                finalMessage = toActionableErrorMessage(evt.message);
-                                sawErrorEvent = true;
-                                markConnectionStatusFromError(finalMessage);
-                                reviewProgress.addLog(finalMessage, "error");
-                                reviewProgress.setTitle("Review failed");
-                                reviewProgress.setState("error");
-                                requestHint.textContent = "Review failed";
-                                requestHint.style.color = "#d32f2f";
-                            }
-                        }
-                    } catch (e) {}
-                }
-            }
-
-            if (!finalMessage) {
-                finalMessage = "Review failed: No completion payload returned.";
-                reviewProgress.addLog(finalMessage, "error");
-                reviewProgress.setTitle("Review failed");
-                reviewProgress.setState("error");
-                requestHint.textContent = "Review failed";
-                requestHint.style.color = "#d32f2f";
-            }
-            if (sawErrorEvent && !sawDoneEvent) {
-                finalMessage = toActionableErrorMessage(finalMessage);
-            }
-            chatHistory.push({role: "assistant", text: finalMessage});
-        } catch (err) {
-            reviewProgress.addLog("Retrying with direct review...");
-            try {
-                var res3 = await fetch("/api/chat", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
-                });
-                var data3 = await res3.json();
-                var resp3 = data3.response || data3.error || "No response";
-                var resp3Failed = !res3.ok || !!data3.error || isErrorLikeText(resp3);
-                if (resp3Failed) {
-                    var err3 = toActionableErrorMessage(extractErrorMessage(data3, resp3));
-                    markConnectionStatusFromError(err3);
-                    reviewProgress.addLog(err3, "error");
-                    reviewProgress.setTitle("Review failed");
-                    reviewProgress.setState("error");
-                    chatHistory.push({role: "assistant", text: err3});
-                    requestHint.textContent = "Review failed";
-                    requestHint.style.color = "#d32f2f";
-                } else {
-                    reviewProgress.addLog("OK " + resp3.split("\n")[0], "success");
-                    reviewProgress.setTitle("Review complete");
-                    reviewProgress.setState("success");
-                    reviewProgress.hide();
-                    chatHistory.push({role: "assistant", text: resp3});
-                    requestHint.textContent = "Review complete";
-                    requestHint.style.color = "#2e7d32";
-                }
-            } catch (err2) {
-                var err2Msg = toActionableErrorMessage(err2.message);
-                markConnectionStatusFromError(err2Msg);
-                reviewProgress.addLog("Error: " + err2Msg, "error");
-                reviewProgress.setTitle("Review failed");
-                reviewProgress.setState("error");
-                requestHint.textContent = "Error: " + err2Msg;
-                requestHint.style.color = "#d32f2f";
-            }
-        }
-    })();
+    var sendBtn = document.getElementById("send-btn");
+    var inputField = document.getElementById("input");
+    inputField.value = msg;
+    inputField.focus();
+    // Message populated - user will send manually
 });
+
+// Auto-expand textarea as user types
+var inputField = document.getElementById("input");
+if (inputField) {
+    function autoExpandTextarea() {
+        this.style.height = "auto";
+        this.style.height = Math.min(this.scrollHeight, 300) + "px";
+    }
+    inputField.addEventListener("input", autoExpandTextarea);
+    inputField.addEventListener("change", autoExpandTextarea);
+    // Initial adjustment in case there's pre-filled content
+    inputField.style.height = "auto";
+    inputField.style.height = Math.min(inputField.scrollHeight, 300) + "px";
+}
 
 // --- Original Chat ---
 var chatHistory = [];
@@ -1039,7 +877,6 @@ send.addEventListener("click", async function() {
     chatHistory.push({role: "user", text: msg});
 
     requestHint.textContent = "Processing...";
-    requestHint.style.color = "#666";
 
     const localFastReply = getLocalFastSmalltalkReply(msg);
     if (localFastReply) {
@@ -1062,9 +899,7 @@ send.addEventListener("click", async function() {
     };
     const ensureStreamProgress = function() {
         if (streamProgressStarted) return;
-        removeTypingBubble(typingBubble);
-        reviewProgress.show("Assistant progress", "Starting request analysis...");
-        reviewProgress.setState("running");
+        initializeStreamProgress(typingBubble, "Assistant progress", "Starting request analysis...");
         streamProgressStarted = true;
     };
     const renderChatProgressMessage = function(evt) {
@@ -1079,8 +914,9 @@ send.addEventListener("click", async function() {
             : phase === "detect" ? "Detect"
             : phase === "complete" ? "Complete"
             : "Progress";
-        const stepInfo = Number.isInteger(evt.step) && Number.isInteger(evt.total_steps)
-            ? " [step " + evt.step + "/" + evt.total_steps + "]"
+        const stepInfo = Number.isInteger(evt.step) && Number.isInteger(evt.total_steps) && evt.total_steps > 0
+            ? " (step " + evt.step + "/" + evt.total_steps + ")"
+            : Number.isInteger(evt.step) ? " (step " + evt.step + ")"
             : "";
         const toolInfo = evt.tool ? " [" + String(evt.tool).replace(/_/g, " ") + "]" : "";
         const status = level === "error" ? "Error" : level === "warning" ? "Warning" : level === "success" ? "OK" : badge;
@@ -1163,7 +999,7 @@ send.addEventListener("click", async function() {
                 reviewProgress.setTitle("Request failed");
                 reviewProgress.setState("error");
             } else {
-                reviewProgress.addLog("OK Response is ready.", "success");
+                reviewProgress.addLog("OK | Response is ready.", "success");
                 reviewProgress.setTitle("Response ready");
                 reviewProgress.setState("success");
                 reviewProgress.hide();
@@ -1447,10 +1283,10 @@ if (quickReviewContinueBtn) {
 }
 setQuickReviewMode("combined");
 if (confluenceReviewTitle) {
-    confluenceReviewTitle.textContent = getReviewPanelTitle("combined");
+    // Title set by SSE from backend
 }
 if (prReviewTitle) {
-    prReviewTitle.textContent = getReviewPanelTitle("pr");
+    // Title set by SSE from backend
 }
 
 
@@ -1639,124 +1475,13 @@ if (startCombinedReviewBtn) {
         mainChat.style.display = "flex";
         sidebar.style.display = "";
 
-        createUserMessageBubble(msg);
-        chatHistory.push({role: "user", text: msg});
-        requestHint.textContent = "Sending combined review request...";
-        requestHint.style.color = "#666";
-        reviewProgress.show("Combined document/code review", "Starting combined review...");
+        var combinedInputField = document.getElementById("input");
+        if (combinedInputField) {
+            combinedInputField.value = msg;
+            combinedInputField.focus();
+            // Message populated - user will send manually
+        }
 
-        (async function() {
-            try {
-                var combinedPayload = withUserAuthPayload({
-                    conf_page_id: pageId,
-                    pr_owner: prMatch.owner,
-                    pr_repo: prMatch.repo,
-                    pr_number: prMatch.prNum,
-                    pr_checklist: checklist,
-                    conf_checklist: checklist,
-                    skip_inline: false,
-                    skip_footer: false,
-                    confluence_base_url: confluenceBaseUrl,
-                    github_base_url: githubBaseUrl
-                });
-
-                var combinedRes = await fetch("/api/combined-review-stream", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(combinedPayload)
-                });
-
-                if (!combinedRes.ok || !combinedRes.body) {
-                    throw new Error("Combined SSE unavailable");
-                }
-
-                const combinedReader = combinedRes.body.getReader();
-                const combinedDecoder = new TextDecoder();
-                let combinedBuffer = "";
-                reviewProgress.addLog("Combined review started...");
-
-                while (true) {
-                    const combinedChunk = await combinedReader.read();
-                    if (combinedChunk.done) break;
-
-                    combinedBuffer += combinedDecoder.decode(combinedChunk.value, {stream: true});
-                    const parts = combinedBuffer.split("\n\n");
-                    combinedBuffer = parts.pop();
-
-                    for (const part of parts) {
-                        if (!part.trim()) continue;
-
-                        let eventType = null;
-                        const dataLines = [];
-                        part.split("\n").forEach(function(line) {
-                            if (line.startsWith("event:")) {
-                                eventType = line.slice(6).trim();
-                            } else if (line.startsWith("data:")) {
-                                dataLines.push(line.slice(5).trim());
-                            }
-                        });
-
-                        if (!dataLines.length) continue;
-
-                        const payloadText = dataLines.join("\n");
-                        let payload;
-                        try {
-                            payload = JSON.parse(payloadText);
-                        } catch (parseErr) {
-                            payload = {message: payloadText};
-                        }
-
-                        var normalizedEventType = eventType || payload.type || "message";
-                        if (normalizedEventType === "progress") {
-                            normalizedEventType = "message";
-                        }
-
-                        if (normalizedEventType === "message" && payload.message) {
-                            reviewProgress.addLog(payload.message, payload.level || "info");
-                            requestHint.textContent = payload.message;
-                            requestHint.style.color = "#666";
-                        } else if (normalizedEventType === "done") {
-                            var doneText = payload.message || "Combined review complete.";
-                            reviewProgress.addLog(doneText, "success");
-                            reviewProgress.setTitle("Review complete");
-                            reviewProgress.setState("success");
-                            reviewProgress.hide();
-                            requestHint.textContent = "Review complete";
-                            requestHint.style.color = "#2e7d32";
-                            createAssistantMessageBubble(doneText);
-                            chatHistory.push({role: "assistant", text: doneText});
-                        } else if (normalizedEventType === "error") {
-                            if (String(payload.level || "").toLowerCase() === "warning") {
-                                var combinedWarn = toActionableErrorMessage(payload.message || payload.error || "Warning");
-                                reviewProgress.addLog(combinedWarn, "warning");
-                                requestHint.textContent = "Completed with warnings";
-                                requestHint.style.color = "#b26a00";
-                            } else {
-                                var combinedErr = toActionableErrorMessage(payload.message || payload.error || "Combined review failed");
-                                markConnectionStatusFromError(combinedErr);
-                                reviewProgress.addLog(combinedErr, "error");
-                                reviewProgress.setTitle("Review failed");
-                                reviewProgress.setState("error");
-                                requestHint.textContent = "Review failed";
-                                requestHint.style.color = "#d32f2f";
-                                createAssistantMessageBubble(combinedErr);
-                                chatHistory.push({role: "assistant", text: combinedErr});
-                            }
-                        }
-                    }
-                }
-            } catch (streamErr) {
-                var combinedMsg = toActionableErrorMessage(streamErr && streamErr.message ? streamErr.message : "Combined review failed");
-                markConnectionStatusFromError(combinedMsg);
-                reviewProgress.addLog(combinedMsg, "error");
-                reviewProgress.setTitle("Review failed");
-                reviewProgress.setState("error");
-                requestHint.textContent = "Review failed";
-                requestHint.style.color = "#d32f2f";
-                createAssistantMessageBubble(combinedMsg);
-                chatHistory.push({role: "assistant", text: combinedMsg});
-            }
-        })();
     });
 }
 
@@ -1859,280 +1584,13 @@ confStartBtn.addEventListener("click", function() {
     mainChat.style.display = "flex";
     sidebar.style.display = "";
 
-    createUserMessageBubble(msg);
-    chatHistory.push({role: "user", text: msg});
-    requestHint.textContent = currentMode === "combined" ? "Sending combined review request..." : "Sending request...";
-    requestHint.style.color = "#666";
-    reviewProgress.show(currentMode === "combined" ? "Combined document/code review" : "Confluence page review", currentMode === "combined" ? "Starting combined review..." : "Starting Confluence review...");
+    var confInputField = document.getElementById("input");
+    if (confInputField) {
+        confInputField.value = msg;
+        confInputField.focus();
+        // Message populated - user will send manually
+    }
 
-    (async function() {
-        try {
-            if (currentMode === "combined") {
-                var githubBaseUrl = parseGithubApiBaseUrlFromPrLink(prLink);
-                var combinedPayload = withUserAuthPayload({
-                    conf_page_id: pageId,
-                    pr_owner: prMatch.owner,
-                    pr_repo: prMatch.repo,
-                    pr_number: prMatch.prNum,
-                    pr_checklist: checklist,
-                    conf_checklist: checklist,
-                    skip_inline: false,
-                    skip_footer: false,
-                    confluence_base_url: confluenceBaseUrl,
-                    github_base_url: githubBaseUrl
-                });
-
-                var combinedRes = await fetch("/api/combined-review-stream", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(combinedPayload)
-                });
-
-                if (!combinedRes.ok || !combinedRes.body) {
-                    throw new Error("Combined SSE unavailable");
-                }
-
-                const combinedReader = combinedRes.body.getReader();
-                const combinedDecoder = new TextDecoder();
-                let combinedBuffer = "";
-                reviewProgress.addLog("Combined review started...");
-
-                while (true) {
-                    const combinedChunk = await combinedReader.read();
-                    if (combinedChunk.done) break;
-
-                    combinedBuffer += combinedDecoder.decode(combinedChunk.value, {stream: true});
-                    const parts = combinedBuffer.split("\n\n");
-                    combinedBuffer = parts.pop();
-
-                    for (const part of parts) {
-                        if (!part.trim()) continue;
-
-                        let eventType = null;
-                        const dataLines = [];
-                        part.split("\n").forEach(function(line) {
-                            if (line.startsWith("event:")) {
-                                eventType = line.slice(6).trim();
-                            } else if (line.startsWith("data:")) {
-                                dataLines.push(line.slice(5).trim());
-                            }
-                        });
-
-                        if (!dataLines.length) continue;
-
-                        const payloadText = dataLines.join("\n");
-                        let payload;
-                        try {
-                            payload = JSON.parse(payloadText);
-                        } catch (parseErr) {
-                            payload = {message: payloadText};
-                        }
-
-                        var normalizedEventType = eventType || payload.type || "message";
-                        if (normalizedEventType === "progress") {
-                            normalizedEventType = "message";
-                        }
-
-                        if (normalizedEventType === "message" && payload.message) {
-                            reviewProgress.addLog(payload.message, payload.level || "info");
-                            requestHint.textContent = payload.message;
-                            requestHint.style.color = "#666";
-                        } else if (normalizedEventType === "done") {
-                            var doneText = payload.message || "Combined review complete.";
-                            reviewProgress.addLog(doneText, "success");
-                            reviewProgress.setTitle("Review complete");
-                            reviewProgress.setState("success");
-                            reviewProgress.hide();
-                            requestHint.textContent = "Review complete";
-                            requestHint.style.color = "#2e7d32";
-                            createAssistantMessageBubble(doneText);
-                            chatHistory.push({role: "assistant", text: doneText});
-                        } else if (normalizedEventType === "error") {
-                            if (String(payload.level || "").toLowerCase() === "warning") {
-                                var combinedWarn = toActionableErrorMessage(payload.message || payload.error || "Warning");
-                                reviewProgress.addLog(combinedWarn, "warning");
-                                requestHint.textContent = "Completed with warnings";
-                                requestHint.style.color = "#b26a00";
-                            } else {
-                                var combinedErr = toActionableErrorMessage(payload.message || payload.error || "Combined review failed");
-                                markConnectionStatusFromError(combinedErr);
-                                reviewProgress.addLog(combinedErr, "error");
-                                reviewProgress.setTitle("Review failed");
-                                reviewProgress.setState("error");
-                                requestHint.textContent = "Review failed";
-                                requestHint.style.color = "#d32f2f";
-                                createAssistantMessageBubble(combinedErr);
-                                chatHistory.push({role: "assistant", text: combinedErr});
-                            }
-                        }
-                    }
-                }
-
-                return;
-            }
-
-            var res = await fetch("/api/confluence-review-stream", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(withUserAuthPayload({
-                    page_id: pageId,
-                    page_input: link,
-                    doc_type: docType,
-                    checklist: checklist,
-                    outputs: outputs,
-                    prompt: msg,
-                    history: chatHistory,
-                    confluence_base_url: confluenceBaseUrl
-                }))
-            });
-
-            if (!res.ok || !res.body) {
-                reviewProgress.addLog("Streaming unavailable, using direct review...");
-                var res2 = await fetch("/api/chat", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(withUserAuthPayload({prompt: msg, history: chatHistory}))
-                });
-                var data2 = await res2.json();
-                var resp = data2.response || data2.error || "No response";
-                var fallbackFailed = !res2.ok || !!data2.error || isErrorLikeText(resp);
-                if (fallbackFailed) {
-                    var fallbackErr = toActionableErrorMessage(extractErrorMessage(data2, resp));
-                    markConnectionStatusFromError(fallbackErr);
-                    reviewProgress.addLog("Error: " + fallbackErr, "error");
-                    reviewProgress.setTitle("Review failed");
-                    reviewProgress.setState("error");
-                    requestHint.textContent = "Review failed";
-                    requestHint.style.color = "#d32f2f";
-                    chatHistory.push({role: "assistant", text: fallbackErr});
-                    createAssistantMessageBubble(fallbackErr);
-                    return;
-                }
-                reviewProgress.addLog("OK " + resp.split("\n")[0], "success");
-                reviewProgress.setTitle("Review complete");
-                reviewProgress.setState("success");
-                reviewProgress.hide();
-                chatHistory.push({role: "assistant", text: resp});
-                requestHint.textContent = "Review complete";
-                requestHint.style.color = "#2e7d32";
-                return;
-            }
-
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let assistantText = "";
-            let buffer = "";
-            let seenFirstChunk = false;
-            reviewProgress.addLog("Review started...");
-
-            while (true) {
-                const result = await reader.read();
-                if (result.done) {
-                    break;
-                }
-                buffer += decoder.decode(result.value, {stream: true});
-                const chunks = buffer.split("\n\n");
-                buffer = chunks.pop();
-                for (const chunk of chunks) {
-                    if (!chunk.trim()) continue;
-                    let eventType = null;
-                    let dataLines = [];
-                    chunk.split("\n").forEach(function(line) {
-                        if (line.startsWith("event:")) {
-                            eventType = line.slice(6).trim();
-                        } else if (line.startsWith("data:")) {
-                            dataLines.push(line.slice(5).trim());
-                        }
-                    });
-                    if (!dataLines.length) continue;
-                    const payloadText = dataLines.join("\n");
-                    let payload;
-                    try {
-                        payload = JSON.parse(payloadText);
-                    } catch (parseErr) {
-                        payload = {message: payloadText};
-                    }
-                    var normalizedEventType = eventType || payload.type || "message";
-                    if (normalizedEventType === "progress") {
-                        normalizedEventType = "message";
-                    }
-                    if (normalizedEventType === "message" && payload.message) {
-                        reviewProgress.addLog(payload.message, payload.level || "info");
-                        if (!seenFirstChunk) {
-                            seenFirstChunk = true;
-                            reviewProgress.setState("active");
-                        }
-                    } else if (normalizedEventType === "token" && payload.token) {
-                        assistantText += payload.token;
-                        if (!seenFirstChunk) {
-                            seenFirstChunk = true;
-                            reviewProgress.setState("active");
-                        }
-                    } else if (normalizedEventType === "done") {
-                        if (payload.response) {
-                            assistantText = payload.response;
-                        }
-                        if (payload.summary) {
-                            reviewProgress.addLog(payload.summary, "success");
-                        }
-                        if (payload.message) {
-                            reviewProgress.addLog(payload.message, payload.level || "success");
-                        }
-                    } else if (eventType === "error") {
-                        if (String(payload.level || "").toLowerCase() === "warning") {
-                            reviewProgress.addLog(payload.message || payload.error || "Warning", "warning");
-                            requestHint.textContent = "Completed with warnings";
-                            requestHint.style.color = "#b26a00";
-                        } else {
-                            throw new Error(payload.error || payload.message || "Review failed");
-                        }
-                    }
-                }
-            }
-
-            if (buffer.trim()) {
-                try {
-                    const tailPayload = JSON.parse(buffer.replace(/^data:\s*/, ""));
-                    if (tailPayload.summary) {
-                        reviewProgress.addLog(tailPayload.summary, "success");
-                    }
-                    if (tailPayload.response) {
-                        assistantText = tailPayload.response;
-                    }
-                } catch (tailErr) {
-                    /* ignore trailing parse issues */
-                }
-            }
-
-            if (!assistantText.trim()) {
-                assistantText = "Review failed: No response returned from review stream.";
-            }
-
-            const botBubble = createStreamingBubble();
-            streamText(botBubble.textEl, botBubble.cursorEl, assistantText, 8);
-            chatHistory.push({role: "assistant", text: assistantText});
-            if (isErrorLikeText(assistantText)) {
-                reviewProgress.setTitle("Review failed");
-                reviewProgress.setState("error");
-                requestHint.textContent = "Review failed";
-                requestHint.style.color = "#d32f2f";
-            } else {
-                reviewProgress.setTitle("Review complete");
-                reviewProgress.setState("success");
-                requestHint.textContent = "Review complete";
-                requestHint.style.color = "#2e7d32";
-                reviewProgress.hide();
-            }
-        } catch (err) {
-            var streamErr = toActionableErrorMessage(err.message);
-            markConnectionStatusFromError(streamErr);
-            reviewProgress.addLog("Error: " + streamErr, "error");
-            reviewProgress.setTitle("Review failed");
-            reviewProgress.setState("error");
-            requestHint.textContent = "Error: " + streamErr;
-            requestHint.style.color = "#d32f2f";
-        }
-    })();
 });
 
 // --- Help Modal Handlers ---
@@ -2140,7 +1598,6 @@ confStartBtn.addEventListener("click", function() {
     const helpBtn = document.getElementById('help-guide-btn');
     const helpCloseBtn = document.getElementById('help-modal-close');
     const helpSidebarBtn = document.getElementById('help-guide-sidebar-btn');
-    const startTourBtn = document.getElementById('start-tour-btn');
 
     function openHelpModal() {
         if (helpModal) {
@@ -2931,13 +2388,6 @@ confStartBtn.addEventListener("click", function() {
         onboarding.stepIndex = 0;
         markOnboardingSeen();
         renderTourStep();
-    }
-
-    if (startTourBtn) {
-        startTourBtn.addEventListener('click', function() {
-            closeHelpModal();
-            startOnboardingTour();
-        });
     }
 
     renderAuthView();
