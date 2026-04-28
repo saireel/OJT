@@ -174,14 +174,32 @@ When the user asks to review a GitHub pull request:
 3. If the user provides explicit review instructions, extend the checklist to cover every required check before calling the tool.
 4. Write FINAL_ANSWER confirming the review was posted with both inline AND summary comments.
 
-The review MUST cover:
-- Naming conventions: PascalCase classes, camelCase JS/TS functions, snake_case Python functions.
-- Consistent formatting and indentation across all changed files.
-- Code structure: overly long/complex functions, missing abstractions.
-- Cross-file consistency: naming, patterns, and behavior alignment with related modules.
-- Security-sensitive patterns: hardcoded secrets, missing input validation, SQL/XSS risks.
-- Missing or inaccurate documentation on public functions.
-- DRY violations and unused code.
+The review MUST cover ONLY the checklist items the user selected. Always use the user's chosen checks, not a default set.
+For each checklist item, understand what it means and check the code thoroughly for it:
+
+CHECKLIST ITEM DEFINITIONS:
+- PascalCase Class Names: All class definitions should use PascalCase (e.g., MyClass, UserManager). Python classes especially.
+- camelCase Function Names: Functions and methods should use camelCase (e.g., getUserData, calculateTotal).
+- snake_case Python Functions: Python functions should use snake_case (e.g., get_user_data, calculate_total).
+- Naming conventions: Check consistency across the codebase for variables, classes, functions, and constants.
+- Hardcoded Secrets / Credentials: Look for hardcoded API keys, passwords, tokens, database credentials in strings or variables.
+- Input Validation: Check that all user inputs are validated before use (length checks, type checks, range checks, etc).
+- Proper Error Handling: Check that functions have try/except blocks, error messages are clear, and errors are properly logged.
+- Comment Accuracy: Verify that code comments are accurate and match what the code actually does. Remove misleading comments.
+- Consistent formatting and indentation: Check for consistent indentation, spacing, line breaks across all files.
+- Code structure: Identify overly long/complex functions, missing abstractions, excessive nesting.
+- Cross-file consistency: Verify naming patterns, design patterns, and behavior are consistent across related modules.
+- Security patterns: Check for SQL injection risks, XSS vulnerabilities, missing input validation, insecure data handling.
+- Documentation: Verify public functions have docstrings explaining parameters, return values, and exceptions.
+- DRY violations: Look for duplicated code that should be extracted into a shared function.
+- Unused code: Find variables, imports, functions that are defined but never used.
+
+If no specific checklist is provided, default to:
+- Naming conventions
+- Input Validation
+- Proper Error Handling
+- Documentation
+- Security patterns
 
 When posting inline comments, always use this format:
   Issue: <what is wrong>
@@ -508,7 +526,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         if pr_matches:
             owner, repo, pr_num = pr_matches[0]
             repo_full = f"{owner}/{repo}"
-            checklist = _get_cached_pr_checklist()
+            checklist = pr_checklist  # Use user-selected checklist, not default
             review_key = _make_review_coalesce_key(
                 repo_full,
                 int(pr_num),

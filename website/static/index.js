@@ -1465,8 +1465,8 @@ if (startCombinedReviewBtn) {
         var githubBaseUrl = parseGithubApiBaseUrlFromPrLink(prLink);
         var pageId = parsedPage.pageId;
 
-        var msg = "Review this Confluence page: " + confLink;
-        msg += "\n\nReview this GitHub PR: " + prMatch.url;
+        var msg = "Review a combination of this Confluence page: " + confLink;
+        msg += "\n\n and this GitHub PR: " + prMatch.url;
         msg += "\n\nReview type: document and code";
         msg += "\n\nExpected output:\n- " + outputs.join("\n- ");
         msg += "\n\nChecklist items to review:\n- " + checklist.join("\n- ");

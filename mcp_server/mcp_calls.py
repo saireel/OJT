@@ -238,7 +238,7 @@ def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_secti
         return {"success": True, "data": text}
     return {"success": False, "error": error or "Failed to get page content"}
 
-def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "", skip_inline: bool = False, skip_footer: bool = False, __user_auth: dict | None = None) -> Dict[str, Any]:
+def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "", skip_inline: bool = True, skip_footer: bool = False, __user_auth: dict | None = None) -> Dict[str, Any]:
     source = page_input or page_id
     page_ids = _extract_confluence_page_ids(source)
     if not page_ids:

@@ -1726,17 +1726,20 @@ class ReviewActions:
             logger.info("[REVIEW] Skipping footer post (skip_footer=True)")
             footer_posted = False
         else:
-            for attempt in range(3):
-                delay = 2 * (attempt + 1)
-                logger.info("[REVIEW] Footer post attempt %d/3 (delay=%ds)", attempt + 1, delay)
-                time.sleep(delay)
-                footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
-                if footer_response is not None and not footer_error:
-                    logger.info("[REVIEW] Footer posted successfully on attempt %d", attempt + 1)
-                    break
-                logger.warning("[REVIEW] Footer post failed on attempt %d after v2/v1 fallback: %s", attempt + 1, footer_error)
-            footer_posted = footer_response is not None and not footer_error
-
+             footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
+             if footer_response is not None and not footer_error:
+                 logger.info("[REVIEW] Footer posted successfully")
+             else:
+                 logger.warning("[REVIEW] Footer post failed: %s", footer_error)
+                 for attempt in range(2):
+                     time.sleep(2 * (attempt + 1))
+                     logger.info("[REVIEW] Footer retry %d/2 (delay=%ds)", attempt + 1, 2 * (attempt + 1))
+                     footer_response, footer_error = self.api.post_footer_comment(page_id=page_id, comment=footer_comment)
+                     if footer_response is not None and not footer_error:
+                         logger.info("[REVIEW] Footer posted successfully on retry %d", attempt + 1)
+                         break
+                     logger.warning("[REVIEW] Footer retry %d failed: %s", attempt + 1, footer_error)
+             footer_posted = footer_response is not None and not footer_error
         state["_defer_inline"] = False
         deferred = state.pop("_deferred_inlines", [])
         if skip_inline:
@@ -1771,7 +1774,7 @@ class ReviewActions:
                     if result is not None and not error:
                         with _state_lock:
                             state["comments_posted"] += 1
-                       
+                        return True
                     if error:
                         last_error[0] = error
                     return False
@@ -1796,7 +1799,7 @@ class ReviewActions:
                     except Exception:
                         pass  # Silently ignore emission errors
 
-            MAX_WORKERS = 5
+            MAX_WORKERS = 10
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = [executor.submit(_post_one, item) for item in deferred]
                 done_count = 0

@@ -326,18 +326,27 @@ class ConfluenceAPI:
             match_index = 0
 
         path = "/api/v2/inline-comments"
+        # Escape special characters for XHTML storage format
+        escaped_comment = html.escape(comment, quote=True)
+        escaped_selection = html.escape(selection, quote=True)
+        
         payload = {
             "pageId": page_id,
             "body": {
                 "representation": "storage",
-                "value": comment,
+                "value": escaped_comment,
             },
             "inlineCommentProperties": {
-                "textSelection": selection,
+                "textSelection": escaped_selection,
                 "textSelectionMatchCount": match_count,
                 "textSelectionMatchIndex": match_index,
             },
         }
+
+        # Debug: log the payload before sending
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug("[INLINE_COMMENT] Sending payload: pageId=%s, comment_len=%d, selection=%s", page_id, len(escaped_comment), escaped_selection[:50])
 
         response, error = self._request("POST", path, json=payload)
         if error or response is None:

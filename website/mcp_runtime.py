@@ -11,6 +11,15 @@ MCP_SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MCP_SERVER_MODULE = "mcp_server.mcp_tools"
 
 COPILOT_BRIDGE_URL = "http://127.0.0.1:5100/api/prompt"
+# Fallback URLs if primary endpoint fails
+COPILOT_BRIDGE_FALLBACKS = [
+    "http://127.0.0.1:5100/api/chat",
+    "http://127.0.0.1:5100/copilot/chat",
+    "http://127.0.0.1:5100/v1/chat/completions",
+]
+PREFERRED_LLM_MODEL = os.getenv("PREFERRED_LLM_MODEL", "claude")  # Default to Claude
+# NOTE: Model selection may also require VS Code settings configuration
+# The bridge may respect: VS Code > Settings > Copilot > Model Selection
 
 _USER_AUTH_LOCAL = threading.local()
 
@@ -283,7 +292,39 @@ mcp_client = MCPClient()
 def call_llm(prompt: str) -> tuple[str, str | None]:
     """Send a prompt to the LLM (Copilot) and return (response, error)."""
     try:
-        resp = requests.post(COPILOT_BRIDGE_URL, json={"prompt": prompt}, timeout=90)
+        # Use default LLM without forcing a specific model
+        payload = {"prompt": prompt}
+        headers = {
+            "Content-Type": "application/json",
+        }
+        
+        # List of endpoints to try in order (without model parameter)
+        endpoints_to_try = [
+            COPILOT_BRIDGE_URL,
+            *COPILOT_BRIDGE_FALLBACKS,
+        ]
+        
+        resp = None
+        last_error = None
+        
+        # Try each endpoint
+        for endpoint_url in endpoints_to_try:
+            try:
+                resp = requests.post(endpoint_url, json=payload, headers=headers, timeout=90)
+                resp.raise_for_status()
+                # Success! Break out of loop
+                break
+            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError) as e:
+                last_error = e
+                continue
+        
+        # If we got no response or all requests failed
+        if not resp or resp.status_code >= 400:
+            error_msg = f"Bridge not responding. Tried endpoints: {', '.join(endpoints_to_try)}"
+            if last_error:
+                error_msg += f" (Last error: {str(last_error)})"
+            return "", error_msg
+        
         data = resp.json()
         if "error" in data:
             return "", f"Bridge error: {data['error']}"

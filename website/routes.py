@@ -13,7 +13,7 @@ import queue
 if TYPE_CHECKING:
     import requests
     from .mcp_runtime import TOOL_REGISTRY, clear_active_user_auth, get_active_user_auth, mcp_client, normalize_user_auth, set_active_user_auth
-    from .review_logic import _build_checklist_from_panel, _extract_prs_from_text, _get_cached_chat_link_metadata, _get_cached_pr_checklist, _get_cached_pr_files, _make_review_coalesce_key, _run_review_with_coalescing, _try_fast_confluence_spelling_review, _extract_base_urls_from_text, _normalize_confluence_base_url, _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response
+    from .review_logic import _build_checklist_from_panel, _extract_checklist_from_prompt, _extract_prs_from_text, _get_cached_chat_link_metadata, _get_cached_pr_checklist, _get_cached_pr_files, _make_review_coalesce_key, _run_review_with_coalescing, _try_fast_confluence_spelling_review, _extract_base_urls_from_text, _normalize_confluence_base_url, _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response
     from mcp_server.mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
     from .agent_engine import _clean_review_line, run_agent
 
@@ -42,7 +42,7 @@ def register_routes(app):
         global sys, threading, time, json, requests, re, queue
         import sys, threading, time, json, requests, re, queue
         global TOOL_REGISTRY, clear_active_user_auth, get_active_user_auth, mcp_client, normalize_user_auth, set_active_user_auth
-        global _build_checklist_from_panel, _extract_prs_from_text, _get_cached_chat_link_metadata, _get_cached_pr_checklist, _get_cached_pr_files
+        global _build_checklist_from_panel, _extract_checklist_from_prompt, _extract_prs_from_text, _get_cached_chat_link_metadata, _get_cached_pr_checklist, _get_cached_pr_files
         global _make_review_coalesce_key, _run_review_with_coalescing, _try_fast_confluence_spelling_review
         global _extract_base_urls_from_text, _normalize_confluence_base_url, _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response
         global _clean_review_line, run_agent, _STRICT_INLINE_COMMENT_LIMIT
@@ -51,7 +51,7 @@ def register_routes(app):
                 TOOL_REGISTRY, clear_active_user_auth, get_active_user_auth, mcp_client, normalize_user_auth, set_active_user_auth
             )
             from .review_logic import (
-                _build_checklist_from_panel, _extract_prs_from_text, _get_cached_chat_link_metadata,
+                _build_checklist_from_panel, _extract_checklist_from_prompt, _extract_prs_from_text, _get_cached_chat_link_metadata,
                 _get_cached_pr_checklist, _get_cached_pr_files, _make_review_coalesce_key, _run_review_with_coalescing,
                 _try_fast_confluence_spelling_review, _extract_base_urls_from_text, _normalize_confluence_base_url,
                 _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response,
@@ -91,12 +91,18 @@ def register_routes(app):
         review_type = (data.get("review_type") or "").strip()
         doc_type = (data.get("doc_type") or "").strip()
         checklist = data.get("checklist", [])
+        # Extract checklist items from the user's prompt if provided
+        prompt_checklist = _extract_checklist_from_prompt(user_msg)
+        if prompt_checklist:
+            checklist = prompt_checklist  # Use prompt-extracted checklist over UI selection
         outputs = data.get("outputs", [])
         confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist) or (data.get("confluence_checklist_page_id") or "").strip()
         if not user_msg:
             return jsonify({"error": "Empty prompt"}), 400
 
-        fast_smalltalk = _try_fast_smalltalk_response(user_msg)
+        # Skip fast reviews if user has specified a checklist
+        prompt_checklist = _extract_checklist_from_prompt(user_msg)
+        fast_smalltalk = _try_fast_smalltalk_response(user_msg) if not prompt_checklist else None
         if fast_smalltalk:
             return jsonify({"response": fast_smalltalk, "mode": "fast_smalltalk"})
         link_meta, link_meta_from_cache = _get_cached_chat_link_metadata(user_msg, history)
@@ -144,10 +150,11 @@ def register_routes(app):
         if confluence_checklist_page_id:
             link_context += f"Confluence checklist page: {confluence_checklist_page_id}\n"
         # Try direct fast path for lightweight Confluence spelling tasks.
+        # Skip fast path if user has specified a checklist
         set_active_user_auth(user_auth)
         try:
             try:
-                fast_response = _try_fast_confluence_spelling_review(user_msg, history, page_ids)
+                fast_response = _try_fast_confluence_spelling_review(user_msg, history, page_ids) if not prompt_checklist else None
                 if fast_response:
                     return jsonify({"response": fast_response, "detected": detected if detected else None, "mode": "fast_path"})
             except Exception as e:
@@ -187,6 +194,10 @@ def register_routes(app):
         review_type = (data.get("review_type") or "").strip()
         doc_type = (data.get("doc_type") or "").strip()
         checklist = data.get("checklist", [])
+        # Extract checklist items from the user's prompt if provided
+        prompt_checklist = _extract_checklist_from_prompt(user_msg)
+        if prompt_checklist:
+            checklist = prompt_checklist  # Use prompt-extracted checklist over UI selection
         outputs = data.get("outputs", [])
         confluence_checklist_page_id = _resolve_confluence_checklist_page_id(checklist) or (data.get("confluence_checklist_page_id") or "").strip()
 

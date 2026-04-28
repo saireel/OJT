@@ -696,6 +696,34 @@ def _build_checklist_from_panel(panel_items: list[str]) -> list[dict]:
         return _build_universal_pr_review_checklist()
     return checklist
 
+
+def _extract_checklist_from_prompt(user_msg: str) -> list[str]:
+    """Extract checklist items from the user's prompt text.
+    
+    Looks for patterns like:
+    - "Checklist items to review:"
+    
+    And extracts the bulleted items that follow.
+    """
+    if not user_msg:
+        return []
+    
+    extracted = []
+    # Look for "Checklist items to review:" section
+    checklist_match = re.search(
+        r'checklist\s+(?:items\s+)?to\s+review\s*:\s*((?:[-*]\s+[^\n]+(?:\n|$))+)',
+        user_msg,
+        re.IGNORECASE
+    )
+    
+    if checklist_match:
+        checklist_section = checklist_match.group(1)
+        # Extract bullet points (lines starting with - or *)
+        items = re.findall(r'[-*]\s+([^\n]+)', checklist_section)
+        extracted.extend([item.strip() for item in items if item.strip()])
+    
+    return extracted
+
 def _get_cached_pr_checklist():
     global _CACHED_PR_CHECKLIST, _CACHED_PR_CHECKLIST_AT
     now = time.time()
