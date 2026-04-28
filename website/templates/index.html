@@ -361,7 +361,7 @@
         <div class="panel-modal">
             <div class="panel-header review-panel-header">
                 <div class="panel-header-title-group">
-                    <h2 id="confluence-review-title">Review Confluence Page with a Pull Request</h2>
+                    <h2 id="confluence-review-title">Confluence Page Review</h2>
                     <button type="button" class="btn-secondary btn-small" id="confluence-change-mode-btn">Change mode</button>
                 </div>
                 <button class="close-btn" id="confluence-review-close">&times;</button>
@@ -467,53 +467,9 @@
                             <input type="checkbox">
                             <span>Missing Sections / Incomplete Content</span>
                         </div>
-                    </div>
-
-                    <!-- Combined checklist (shown when mode = "combined") -->
-                    <div class="checklist-items" id="confluence-combined-checklist-items" style="display:none;">
-                        <div class="check-item" data-category="alignment" data-check-id="doc_coverage">
-                            <input type="checkbox" checked>
-                            <span>Documentation Coverage for New / Changed Code</span>
-                        </div>
-                        <div class="check-item" data-category="alignment" data-check-id="code_examples">
-                            <input type="checkbox" checked>
-                            <span>Code Examples Match PR Changes</span>
-                        </div>
-                        <div class="check-item" data-category="alignment" data-check-id="api_signatures">
-                            <input type="checkbox" checked>
-                            <span>API / Function Signatures Up to Date</span>
-                        </div>
-                        <div class="check-item" data-category="alignment" data-check-id="config_documented">
-                            <input type="checkbox" checked>
-                            <span>Config / Env Variables Documented</span>
-                        </div>
-                        <div class="check-item" data-category="architecture" data-check-id="architecture_alignment">
-                            <input type="checkbox" checked>
-                            <span>Architecture / Design Alignment with PR</span>
-                        </div>
-                        <div class="check-item" data-category="architecture" data-check-id="instructions_match">
+                        <div class="check-item" data-category="completeness">
                             <input type="checkbox">
-                            <span>Step-by-Step Instructions Match Implementation</span>
-                        </div>
-                        <div class="check-item" data-category="errors" data-check-id="error_handling">
-                            <input type="checkbox">
-                            <span>Error Handling &amp; Edge Cases Documented</span>
-                        </div>
-                        <div class="check-item" data-category="deprecation" data-check-id="deprecated_removed">
-                            <input type="checkbox">
-                            <span>Deprecated Features / APIs Removed from Docs</span>
-                        </div>
-                        <div class="check-item" data-category="consistency" data-check-id="terminology_consistent">
-                            <input type="checkbox">
-                            <span>Consistent Terminology Between Code and Docs</span>
-                        </div>
-                        <div class="check-item" data-category="references" data-check-id="pr_references">
-                            <input type="checkbox">
-                            <span>Links to PR / Ticket References Present</span>
-                        </div>
-                        <div class="check-item" data-category="completeness" data-check-id="code_path_sections">
-                            <input type="checkbox">
-                            <span>Missing Sections for Covered Code Paths</span>
+                            <span>Complete Test Case</span>
                         </div>
                     </div>
                 </div>

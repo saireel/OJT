@@ -8,8 +8,7 @@ import time
 import requests
 
 MCP_SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-MCP_SERVER_SCRIPT = os.path.join(MCP_SERVER_DIR, "mcp_tools.py")
+MCP_SERVER_MODULE = "mcp_server.mcp_tools"
 
 COPILOT_BRIDGE_URL = "http://127.0.0.1:5100/api/prompt"
 
@@ -73,8 +72,11 @@ class MCPClient:
                 "READABILITY_SENTENCE_WORD_LIMIT": "40",
                 "READABILITY_PARAGRAPH_WORD_LIMIT": "250",
             }
+            env["PYTHONPATH"] = os.pathsep.join(
+                [MCP_SERVER_DIR, env.get("PYTHONPATH", "")]
+            ).strip(os.pathsep)
             self.process = subprocess.Popen(
-                [sys.executable, MCP_SERVER_SCRIPT],
+                [sys.executable, "-m", MCP_SERVER_MODULE],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

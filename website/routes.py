@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     import requests
     from .mcp_runtime import TOOL_REGISTRY, clear_active_user_auth, get_active_user_auth, mcp_client, normalize_user_auth, set_active_user_auth
     from .review_logic import _build_checklist_from_panel, _extract_prs_from_text, _get_cached_chat_link_metadata, _get_cached_pr_checklist, _get_cached_pr_files, _make_review_coalesce_key, _run_review_with_coalescing, _try_fast_confluence_spelling_review, _extract_base_urls_from_text, _normalize_confluence_base_url, _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response
-    from mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
+    from mcp_server.mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
     from .agent_engine import _clean_review_line, run_agent
 
 def register_routes(app):
@@ -39,7 +39,7 @@ def register_routes(app):
                 _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response,
             )
             from .agent_engine import _clean_review_line, run_agent
-            from mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
+            from mcp_server.mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
         except Exception:
             # fallback to absolute imports
             from mcp_runtime import (
@@ -52,7 +52,7 @@ def register_routes(app):
                 _augment_user_auth_with_detected_base_urls, _resolve_confluence_checklist_page_id, _try_fast_smalltalk_response,
             )
             from agent_engine import _clean_review_line, run_agent
-            from mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
+            from mcp_server.mcp_calls import STRICT_INLINE_COMMENT_LIMIT as _STRICT_INLINE_COMMENT_LIMIT
     def index():
         _lazy_imports()
         # Renders the main web page (index.html)
@@ -182,7 +182,13 @@ def register_routes(app):
             SENTINEL = object()
 
             def _fmt(event_type, message):
-                return "data: " + json.dumps({"type": event_type, "message": message}) + "\n\n"
+                payload = {"type": event_type}
+                if isinstance(message, dict):
+                    payload.update(message)
+                    payload.setdefault("message", "")
+                else:
+                    payload["message"] = message
+                return "data: " + json.dumps(payload) + "\n\n"
 
             def _run():
                 try:
@@ -243,6 +249,7 @@ def register_routes(app):
                     q.put(("done", json.dumps({"response": response, "detected": detected or None})))
                 except Exception as exc:
                     q.put(("error", str(exc)))
+                finally:
                     q.put(SENTINEL)
 
             threading.Thread(target=_run, daemon=True).start()
@@ -438,9 +445,11 @@ def register_routes(app):
             return jsonify({"error": "Empty prompt"}), 400
 
         def generate():
-            def send_event(event_type, message):
-            
-                return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+            def send_event(event_type, message, level=None):
+                payload = {'type': event_type, 'message': message}
+                if level:
+                    payload['level'] = level
+                return f"data: {json.dumps(payload)}\n\n"
         
             # Check credentials upfront
             if not user_auth or not user_auth.get("github_owner") or not user_auth.get("github_token"):
@@ -476,9 +485,9 @@ def register_routes(app):
                     if len(file_list) > 15:
                         yield send_event("progress", f"  ... and {len(file_list)-15} more file(s)")
                 else:
-                    yield send_event("progress", "Could not list files, continuing...")
+                    yield send_event("progress", "Could not list files, continuing...", level="warning")
             except Exception as e:
-                yield send_event("progress", f"File listing error: {e}")
+                yield send_event("progress", f"File listing warning: {e}", level="warning")
                 file_list = []
             # --- Step 2: Run the full review tool in a background thread ---
             yield send_event("progress", "Running checklist analysis (flake8, conventions, consistency)...")
@@ -680,8 +689,11 @@ def register_routes(app):
             return jsonify({"error": "No page ID or URL provided"}), 400
 
         def generate():
-            def send_event(event_type, message):
-                return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+            def send_event(event_type, message, level=None):
+                payload = {'type': event_type, 'message': message}
+                if level:
+                    payload['level'] = level
+                return f"data: {json.dumps(payload)}\n\n"
                     # Check credentials upfront
         
             if not user_auth or not user_auth.get("confluence_email") or not user_auth.get("confluence_api_token"):
@@ -844,13 +856,13 @@ def register_routes(app):
                     yield send_event("progress", "  No issues were found for the selected checklist")
                 yield send_event("progress", f"  Inline comments posted: {inline_posted}")
                 if inline_failed > 0:
-                    yield send_event("progress", f"  Inline comments failed: {inline_failed}")
+                    yield send_event("progress", f"  Inline comments failed: {inline_failed}", level="warning")
                 elif total_issues == 0:
                     yield send_event("progress", "  No inline comments were posted because no findings required them")
                 if footer_posted:
                     yield send_event("progress", "  Footer summary posted to page")
                 else:
-                    yield send_event("progress", "  Footer summary was not posted")
+                    yield send_event("progress", "  Footer summary was not posted", level="warning")
                 if executed_checks:
                     yield send_event("progress", "  Executed checks: " + ", ".join(str(item) for item in executed_checks))
                 if skipped_checks:
@@ -916,8 +928,11 @@ def register_routes(app):
             return jsonify({"error": "PR owner, repo, and number required"}), 400
 
         def generate():
-            def send_event(event_type, message):
-                return f"data: {json.dumps({'type': event_type, 'message': message})}\n\n"
+            def send_event(event_type, message, level=None):
+                payload = {'type': event_type, 'message': message}
+                if level:
+                    payload['level'] = level
+                return f"data: {json.dumps(payload)}\n\n"
 
             # Check both credentials
             if not user_auth or not user_auth.get("confluence_email") or not user_auth.get("confluence_api_token"):

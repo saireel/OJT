@@ -1,7 +1,7 @@
 import logging
-from typing import Optional, Any, Dict, List, cast
+from typing import Optional, Any, Dict, List, Tuple, cast
 from fastmcp import FastMCP
-from mcp_calls import (
+from mcp_server.mcp_calls import (
     create_space,
     create_page,
     update_page,
@@ -363,20 +363,20 @@ def review_combined_pr_and_confluence(repo: str, pr_number: int, conf_page_id: s
             logger.warning("[REVIEW] Could not fetch Confluence page: {0}".format(str(e)))
             conf_page_content = ""
         
-        # STEP 3: Merge checklists and prepare unified check context
-        all_checks = []
+        # STEP 3: Merge checklists and prepare unified check context.
+        requested_checks: List[str] = []
         if pr_checklist:
-            all_checks.extend(pr_checklist)
+            requested_checks.extend(pr_checklist)
         if conf_checklist:
-            all_checks.extend(conf_checklist)
-        
-        if not all_checks:
+            requested_checks.extend(conf_checklist)
+
+        if not requested_checks:
             return {
                 "success": False,
                 "error": "No checks selected",
                 "results": {}
             }
-        
+
         # STEP 4: Map check identifiers to functions.
         # Frontend may send canonical IDs or human labels with small punctuation/spacing variations.
         check_mapping = {
@@ -422,9 +422,27 @@ def review_combined_pr_and_confluence(repo: str, pr_number: int, conf_page_id: s
                 return direct
             return check_aliases.get(direct, "")
 
+        # Normalize and de-duplicate selections so overlapping PR/Confluence checks
+        # do not run twice or inflate summary counts.
+        normalized_pairs: List[Tuple[str, str]] = []
+        seen_check_ids = set()
+        for requested_name in requested_checks:
+            check_id = _normalize_check_id(requested_name)
+            if not check_id or check_id in seen_check_ids:
+                continue
+            seen_check_ids.add(check_id)
+            normalized_pairs.append((requested_name, check_id))
+
+        if not normalized_pairs:
+            return {
+                "success": False,
+                "error": "No supported checks selected",
+                "results": {}
+            }
+
         # STEP 5: Execute each check with BOTH PR and Confluence data
         results = {}
-        logger.info("[REVIEW] Running {0} combined checks with both PR and Confluence content...".format(len(all_checks)))
+        logger.info("[REVIEW] Running {0} unique combined checks with both PR and Confluence content...".format(len(normalized_pairs)))
 
         # Define action map and helper functions for per-check detailed findings
         action_map = {
@@ -465,126 +483,116 @@ def review_combined_pr_and_confluence(repo: str, pr_number: int, conf_page_id: s
         detailed_findings: List[Dict[str, str]] = []
         passed_checks: List[str] = []
 
-        for requested_name in all_checks:
-            logger.info("[REVIEW] >>> Running combined check: {0}".format(requested_name))
+        for requested_name, check_id in normalized_pairs:
+            logger.info("[REVIEW] >>> Running combined check: {0}".format(check_id))
             try:
-                check_id = _normalize_check_id(requested_name)
-                if check_id:
-                    check_func = check_mapping[check_id]
+                check_func = check_mapping[check_id]
 
-                    # Call check with BOTH PR and Confluence data
-                    result = check_func(
-                        pr_content=pr_files,
-                        pr_sha=head_sha,
-                        conf_content=conf_page_content,
-                        conf_page_id=conf_page_id,
-                        repo=repo
-                    )
-                    results[requested_name] = result
-                    logger.info("[REVIEW] <<< Finished check: {0}".format(requested_name))
+                # Call check with BOTH PR and Confluence data
+                result = check_func(
+                    pr_content=pr_files,
+                    pr_sha=head_sha,
+                    conf_content=conf_page_content,
+                    conf_page_id=conf_page_id,
+                    repo=repo
+                )
+                results[check_id] = result
+                logger.info("[REVIEW] <<< Finished check: {0}".format(check_id))
 
-                    key = _normalize_check_key(requested_name)
-                    compliant = bool(isinstance(result, dict) and result.get("compliant", True))
-                    if not compliant or (isinstance(result, dict) and result.get("error")):
-                        reason = "Flagged as non-compliant."
-                        evidence = ""
-                        if isinstance(result, dict):
-                            err = str(result.get("error") or "").strip()
-                            if err:
-                                reason = "Check execution error: {0}".format(err)
-                                evidence = "The check failed before producing normal metrics."
-                            elif key == "doc_coverage":
-                                cov = int(result.get("coverage_percentage") or 0)
-                                pr_syms = int(result.get("pr_symbols") or 0)
-                                doc_syms = int(result.get("documented_symbols") or 0)
-                                threshold = 80
-                                missing_syms = max(pr_syms - doc_syms, 0)
-                                reason = (
-                                    "Documentation coverage is below threshold ({0}% required, got {1}%)."
-                                ).format(threshold, cov)
-                                evidence = (
-                                    "coverage_percentage={0}% is documented_symbols/pr_symbols ratio. "
-                                    "documented_symbols={1} = changed PR symbols currently documented. "
-                                    "pr_symbols={2} = total changed symbols found in PR. "
-                                    "missing_symbols={3}."
-                                ).format(cov, doc_syms, pr_syms, missing_syms)
-                            elif key == "api_signatures":
-                                total = int(result.get("functions_in_pr") or 0)
-                                documented = int(result.get("functions_documented") or 0)
-                                missing = max(total - documented, 0)
-                                reason = "Not all changed API signatures are reflected in docs ({0}/{1} documented).".format(documented, total)
-                                evidence = (
-                                    "functions_in_pr={0} = changed functions/classes found in PR. "
-                                    "functions_documented={1} = those with matching documented signatures. "
-                                    "missing_signatures={2}."
-                                ).format(total, documented, missing)
-                            elif key == "config_documented":
-                                total = int(result.get("new_config_vars") or 0)
-                                documented = int(result.get("documented_vars") or 0)
-                                missing = max(total - documented, 0)
-                                reason = "Config/env variables added in PR are not fully documented ({0}/{1} documented).".format(documented, total)
-                                evidence = (
-                                    "new_config_vars={0} = newly detected config/env vars in changed code. "
-                                    "documented_vars={1} = vars documented with usable detail. "
-                                    "missing_vars={2}."
-                                ).format(total, documented, missing)
-                            elif key == "code_examples":
-                                in_docs = int(result.get("examples_in_docs") or 0)
-                                matched = int(result.get("examples_matched") or 0)
-                                mismatched = max(in_docs - matched, 0)
-                                reason = "Code examples are missing or not aligned with PR changes ({0}/{1} matched).".format(matched, in_docs)
-                                evidence = (
-                                    "examples_in_docs={0} = examples analyzed in docs. "
-                                    "examples_matched={1} = examples still matching current implementation. "
-                                    "examples_needing_update={2}."
-                                ).format(in_docs, matched, mismatched)
-                            else:
-                                findings = result.get("findings")
-                                if isinstance(findings, list) and findings:
-                                    reason = str(findings[0])
-                                    if len(findings) > 1:
-                                        reason += " (+{0} more findings)".format(len(findings) - 1)
-                                    evidence = "Total findings returned: {0}.".format(len(findings))
-
-                        action = action_map.get(key, "Review this check result and update docs/code so they are aligned.")
-                        if key == "doc_coverage":
-                            action = "Document each missing changed symbol in Confluence with purpose, inputs/outputs, usage example, and edge-case behavior until coverage meets threshold."
+                key = _normalize_check_key(check_id)
+                compliant = bool(isinstance(result, dict) and result.get("compliant", True))
+                if not compliant or (isinstance(result, dict) and result.get("error")):
+                    reason = "Flagged as non-compliant."
+                    evidence = ""
+                    if isinstance(result, dict):
+                        err = str(result.get("error") or "").strip()
+                        if err:
+                            reason = "Check execution error: {0}".format(err)
+                            evidence = "The check failed before producing normal metrics."
+                        elif key == "doc_coverage":
+                            cov = int(result.get("coverage_percentage") or 0)
+                            pr_syms = int(result.get("pr_symbols") or 0)
+                            doc_syms = int(result.get("documented_symbols") or 0)
+                            threshold = 80
+                            missing_syms = max(pr_syms - doc_syms, 0)
+                            reason = (
+                                "Documentation coverage is too low: only {0} of {1} changed code items are described in the docs ({2}% coverage, target {3}%)."
+                            ).format(doc_syms, pr_syms, cov, threshold)
+                            evidence = (
+                                "Plain meaning: the PR changed {1} symbols, but the docs currently cover only {0} of them, so {2} changed items still have no matching documentation. "
+                                "Metrics: coverage_percentage={3}%, documented_symbols={0}, pr_symbols={1}, missing_symbols={2}."
+                            ).format(doc_syms, pr_syms, missing_syms, cov)
                         elif key == "api_signatures":
-                            action = "Update docs for each changed API signature so parameter names, types, defaults, return type, and raised errors exactly match the code."
+                            total = int(result.get("functions_in_pr") or 0)
+                            documented = int(result.get("functions_documented") or 0)
+                            missing = max(total - documented, 0)
+                            reason = "API signature docs are incomplete: only {0} of {1} changed functions/classes have matching documentation.".format(documented, total)
+                            evidence = (
+                                "Plain meaning: {2} changed APIs have parameter lists, return values, defaults, or names in code that are not fully reflected in the docs. "
+                                "Metrics: functions_in_pr={1}, functions_documented={0}, missing_signatures={2}."
+                            ).format(documented, total, missing)
                         elif key == "config_documented":
-                            action = "For each missing config/env variable, document name, type, default, allowed values/range, required/optional status, and runtime impact."
+                            total = int(result.get("new_config_vars") or 0)
+                            documented = int(result.get("documented_vars") or 0)
+                            missing = max(total - documented, 0)
+                            reason = "Configuration docs are incomplete: only {0} of {1} config or env variables found in the changed code are documented well enough to use.".format(documented, total)
+                            evidence = (
+                                "Plain meaning: {2} settings appear in the changed code without enough documentation for someone to configure them safely. "
+                                "Metrics: new_config_vars={1}, documented_vars={0}, missing_vars={2}."
+                            ).format(documented, total, missing)
                         elif key == "code_examples":
-                            action = "Rewrite mismatched examples to match current imports, signatures, and outputs, then run snippets to verify they execute as documented."
+                            in_docs = int(result.get("examples_in_docs") or 0)
+                            matched = int(result.get("examples_matched") or 0)
+                            mismatched = max(in_docs - matched, 0)
+                            reason = "Code examples are out of date: only {0} of {1} reviewed examples still match the current implementation.".format(matched, in_docs)
+                            evidence = (
+                                "Plain meaning: {2} examples in the docs would likely mislead a reader because imports, signatures, or outputs no longer match the code. "
+                                "Metrics: examples_in_docs={1}, examples_matched={0}, examples_needing_update={2}."
+                            ).format(matched, in_docs, mismatched)
+                        else:
+                            findings = result.get("findings")
+                            if isinstance(findings, list) and findings:
+                                reason = str(findings[0])
+                                if len(findings) > 1:
+                                    reason += " (+{0} more findings)".format(len(findings) - 1)
+                                evidence = "Total findings returned: {0}.".format(len(findings))
 
-                        finding_entry = {
-                            "check": _format_title(requested_name),
-                            "status": "failed",
-                            "why": reason,
-                            "action": action,
-                            "evidence": evidence,
-                        }
-                        detailed_findings.append(finding_entry)
+                    action = action_map.get(key, "Review this check result and update docs/code so they are aligned.")
+                    if key == "doc_coverage":
+                        action = "Start with the highest-impact missing items from the changed PR files. For each missing symbol, add what it does, its inputs/outputs, a small usage example, and any important edge cases or failure behavior."
+                    elif key == "api_signatures":
+                        action = "For each changed public function/class, align the docs to the code exactly: parameter names, parameter types, defaults, return values, and raised errors. Prioritize APIs that are user-facing or already referenced elsewhere in the page."
+                    elif key == "config_documented":
+                        action = "For each undocumented setting, add the variable name, what it controls, expected type, default value, allowed values if limited, whether it is required, and what changes at runtime when it is set incorrectly."
+                    elif key == "code_examples":
+                        action = "Update each stale example so the import path, function signature, arguments, and expected output match the current code, then verify the snippet still works before keeping it in the page."
 
-                        finding_summary = "{0} | Why: {1} | Action: {2}".format(
-                            finding_entry["check"],
-                            reason[:120] + "..." if len(reason) > 120 else reason,
-                            action[:120] + "..." if len(action) > 120 else action
-                        )
-                        if evidence:
-                            finding_summary += " | Evidence: {0}".format(evidence[:120] + "..." if len(evidence) > 120 else evidence)
-                        logger.info("[REVIEW] FINDING: {0}".format(finding_summary))
-                    else:
-                        passed_title = _format_title(requested_name)
-                        passed_checks.append(passed_title)
-                        logger.info("[REVIEW] PASS: {0} | No issues found in this check.".format(passed_title))
+                    finding_entry = {
+                        "check": _format_title(check_id),
+                        "status": "failed",
+                        "why": reason,
+                        "action": action,
+                        "evidence": evidence,
+                    }
+                    detailed_findings.append(finding_entry)
+
+                    finding_summary = "{0} | Why: {1} | Action: {2}".format(
+                        finding_entry["check"],
+                        reason[:120] + "..." if len(reason) > 120 else reason,
+                        action[:120] + "..." if len(action) > 120 else action
+                    )
+                    if evidence:
+                        finding_summary += " | Evidence: {0}".format(evidence[:120] + "..." if len(evidence) > 120 else evidence)
+                    logger.info("[REVIEW] FINDING: {0}".format(finding_summary))
                 else:
-                    logger.warning("[REVIEW] Unknown check: {0}".format(requested_name))
-                    results[requested_name] = {"error": "Unknown check"}
+                    passed_title = _format_title(check_id)
+                    passed_checks.append(passed_title)
+                    logger.info("[REVIEW] PASS: {0} | No issues found in this check.".format(passed_title))
             except Exception as e:
                 logger.error("[REVIEW] Check {0} failed: {1}".format(requested_name, str(e)))
-                results[requested_name] = {"error": str(e), "compliant": False}
+                results[check_id] = {"error": str(e), "compliant": False}
                 detailed_findings.append({
-                    "check": _format_title(requested_name),
+                    "check": _format_title(check_id),
                     "status": "failed",
                     "why": "Check execution error: {0}".format(str(e)),
                     "action": "Fix the reported runtime/tooling error and rerun this check.",
@@ -601,6 +609,7 @@ def review_combined_pr_and_confluence(repo: str, pr_number: int, conf_page_id: s
             "Checks run: {0}".format(len(results)),
             "Non-compliant checks: {0}".format(len(detailed_findings)),
             "Checks with no issues found: {0}".format(len(passed_checks)),
+            "How to read the numbers: counts such as documented_symbols=63 or missing_vars=145 are item counts inside a check. They do not mean 63 or 145 separate review findings.",
         ]
         if detailed_findings:
             summary_lines.append("")
@@ -611,6 +620,7 @@ def review_combined_pr_and_confluence(repo: str, pr_number: int, conf_page_id: s
                 if item.get("evidence"):
                     summary_lines.append("  Evidence / metric meaning: {0}".format(item["evidence"]))
                 summary_lines.append("  What to do (specific): {0}".format(item["action"]))
+                summary_lines.append("")
 
         if passed_checks:
             summary_lines.append("")

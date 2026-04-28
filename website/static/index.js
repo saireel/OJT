@@ -300,7 +300,7 @@ function closeQuickReviewModal() {
     }
 }
 function openConfluencePanelForMode(mode) {
-    setQuickReviewMode(mode);
+    setQuickReviewMode(mode || "confluence");
 
     if (confPanel) {
         confPanel.style.display = "flex";
@@ -310,8 +310,29 @@ function openConfluencePanelForMode(mode) {
     if (prReviewPanel) {
         prReviewPanel.style.display = "none";
     }
+    if (combinedReviewPanel) {
+        combinedReviewPanel.style.display = "none";
+    }
 
     return !!confPanel;
+}
+
+function openCombinedPanelForMode(mode) {
+    setQuickReviewMode(mode || "combined");
+
+    if (combinedReviewPanel) {
+        combinedReviewPanel.style.display = "flex";
+        mainChat.style.display = "none";
+        sidebar.style.display = "none";
+    }
+    if (prReviewPanel) {
+        prReviewPanel.style.display = "none";
+    }
+    if (confPanel) {
+        confPanel.style.display = "none";
+    }
+
+    return !!combinedReviewPanel;
 }
 
 function openPrReviewPanelForMode(mode) {
@@ -912,14 +933,21 @@ startReviewBtn.addEventListener("click", function() {
                                 requestHint.style.color = "#d32f2f";
                             }
                         } else if (evt.type === "error") {
-                            finalMessage = toActionableErrorMessage(evt.message);
-                            sawErrorEvent = true;
-                            markConnectionStatusFromError(finalMessage);
-                            reviewProgress.addLog(finalMessage, "error");
-                            reviewProgress.setTitle("Review failed");
-                            reviewProgress.setState("error");
-                            requestHint.textContent = "Review failed";
-                            requestHint.style.color = "#d32f2f";
+                            if (String(evt.level || "").toLowerCase() === "warning") {
+                                var warningMessage = toActionableErrorMessage(evt.message || "Warning");
+                                reviewProgress.addLog(warningMessage, "warning");
+                                requestHint.textContent = "Completed with warnings";
+                                requestHint.style.color = "#b26a00";
+                            } else {
+                                finalMessage = toActionableErrorMessage(evt.message);
+                                sawErrorEvent = true;
+                                markConnectionStatusFromError(finalMessage);
+                                reviewProgress.addLog(finalMessage, "error");
+                                reviewProgress.setTitle("Review failed");
+                                reviewProgress.setState("error");
+                                requestHint.textContent = "Review failed";
+                                requestHint.style.color = "#d32f2f";
+                            }
                         }
                     } catch (e) {}
                 }
@@ -1027,10 +1055,36 @@ send.addEventListener("click", async function() {
     }
 
     const typingBubble = createTypingBubble();
-    let progressBubble = null;
+    let streamProgressStarted = false;
+    let lastProgressLog = "";
     const cleanupTransientBubbles = function() {
-        if (progressBubble) progressBubble.remove();
         removeTypingBubble(typingBubble);
+    };
+    const ensureStreamProgress = function() {
+        if (streamProgressStarted) return;
+        removeTypingBubble(typingBubble);
+        reviewProgress.show("Assistant progress", "Starting request analysis...");
+        reviewProgress.setState("running");
+        streamProgressStarted = true;
+    };
+    const renderChatProgressMessage = function(evt) {
+        if (!evt || typeof evt !== "object") {
+            return String(evt || "Working...");
+        }
+        const phase = String(evt.phase || "").trim().toLowerCase();
+        const level = String(evt.level || "info").trim().toLowerCase();
+        const baseMessage = String(evt.message || "Working...").trim() || "Working...";
+        const badge = phase === "tool" ? "Tool"
+            : phase === "llm" ? "Model"
+            : phase === "detect" ? "Detect"
+            : phase === "complete" ? "Complete"
+            : "Progress";
+        const stepInfo = Number.isInteger(evt.step) && Number.isInteger(evt.total_steps)
+            ? " [step " + evt.step + "/" + evt.total_steps + "]"
+            : "";
+        const toolInfo = evt.tool ? " [" + String(evt.tool).replace(/_/g, " ") + "]" : "";
+        const status = level === "error" ? "Error" : level === "warning" ? "Warning" : level === "success" ? "OK" : badge;
+        return status + ": " + baseMessage + stepInfo + toolInfo;
     };
 
     try {
@@ -1050,6 +1104,8 @@ send.addEventListener("click", async function() {
         let sseBuf = "";
         let finalResponse = null;
         let finalDetected = null;
+        let streamSawDone = false;
+        let streamSawErrorEvent = false;
 
         while (true) {
             const { value, done } = await sseReader.read();
@@ -1067,17 +1123,15 @@ send.addEventListener("click", async function() {
                 let evt;
                 try { evt = JSON.parse(part.slice(6)); } catch(e) { continue; }
                 if (evt.type === "progress") {
-                    removeTypingBubble(typingBubble);
-                    if (!progressBubble) {
-                        progressBubble = document.createElement("div");
-                        progressBubble.className = "msg bot typing-bubble";
-                        progressBubble.innerHTML = '<div class="msg-inner"><div class="msg-body" style="font-style:italic;opacity:0.7;font-size:0.9em;"></div></div>';
-                        chat.appendChild(progressBubble);
-                        chat.parentElement.scrollTop = chat.parentElement.scrollHeight;
+                    ensureStreamProgress();
+                    const progressLine = renderChatProgressMessage(evt);
+                    if (progressLine !== lastProgressLog) {
+                        reviewProgress.addLog(progressLine, evt.level || "info");
+                        lastProgressLog = progressLine;
                     }
-                    progressBubble.querySelector(".msg-body").textContent = evt.message;
-                    requestHint.textContent = evt.message;
+                    requestHint.textContent = String(evt.message || progressLine || "Working...");
                 } else if (evt.type === "done") {
+                    streamSawDone = true;
                     try {
                         const d = JSON.parse(evt.message);
                         finalResponse = d.response || "No response";
@@ -1086,6 +1140,11 @@ send.addEventListener("click", async function() {
                         finalResponse = evt.message;
                     }
                 } else if (evt.type === "error") {
+                    streamSawErrorEvent = true;
+                    ensureStreamProgress();
+                    reviewProgress.addLog("Error: " + String(evt.message || "Request failed"), "error");
+                    reviewProgress.setTitle("Request failed");
+                    reviewProgress.setState("error");
                     finalResponse = evt.message;
                 }
             }
@@ -1098,14 +1157,29 @@ send.addEventListener("click", async function() {
         cleanupTransientBubbles();
 
         var response = finalResponse || "No response";
+        var terminalStreamFailure = !streamSawDone && streamSawErrorEvent;
+        if (streamProgressStarted) {
+            if (terminalStreamFailure || !streamSawDone) {
+                reviewProgress.setTitle("Request failed");
+                reviewProgress.setState("error");
+            } else {
+                reviewProgress.addLog("OK Response is ready.", "success");
+                reviewProgress.setTitle("Response ready");
+                reviewProgress.setState("success");
+                reviewProgress.hide();
+            }
+        }
         var data = { response, detected: finalDetected };
 
         createAssistantMessageBubble(response);
         chatHistory.push({role: "assistant", text: response});
 
-        if (isErrorLikeText(response)) {
-            requestHint.textContent = "Review failed";
+        if (terminalStreamFailure || !streamSawDone) {
+            requestHint.textContent = "Request failed";
             requestHint.style.color = "#d32f2f";
+        } else if (isErrorLikeText(response)) {
+            requestHint.textContent = "Completed with limitations";
+            requestHint.style.color = "#b26a00";
         } else {
             requestHint.textContent = "Ready for next request";
             requestHint.style.color = "#999";
@@ -1117,6 +1191,11 @@ send.addEventListener("click", async function() {
             return;
         }
         cleanupTransientBubbles();
+        if (streamProgressStarted) {
+            reviewProgress.addLog("Error: " + String(err && err.message ? err.message : "Request failed"), "error");
+            reviewProgress.setTitle("Request failed");
+            reviewProgress.setState("error");
+        }
 
         if (err && (err.name === "AbortError" || /abort/i.test(String(err.message || "")))) {
             requestHint.textContent = "Interrupted by new request";
@@ -1347,7 +1426,17 @@ if (quickReviewContinueBtn) {
             return;
         }
 
-        var opened = openConfluencePanelForMode(mode);
+        if (mode === "combined") {
+            var openedCombined = openCombinedPanelForMode(mode);
+            if (openedCombined) {
+                closeQuickReviewModal();
+                return;
+            }
+            showUiAlert("Could not open the combined review panel. Reload the page and try again.");
+            return;
+        }
+
+        var opened = openConfluencePanelForMode("confluence");
         if (opened) {
             closeQuickReviewModal();
             return;
@@ -1384,7 +1473,7 @@ function parseConfluencePageLink(link) {
     return null;
 }
 
-// Parse Confluence link (and PR link when combined mode is selected)
+// Parse Confluence link
 confParseBtn.addEventListener("click", function() {
     var confParsed = parseConfluencePageLink(confLinkInput.value);
     if (!confParsed) {
@@ -1393,16 +1482,6 @@ confParseBtn.addEventListener("click", function() {
     }
 
     var parseMessage = "Page ID: " + confParsed.pageId;
-    var mode = quickReviewMode || "combined";
-
-    if (mode === "combined") {
-        var prParsed = parseGithubPrLink(confPrLinkInput ? confPrLinkInput.value : "");
-        if (!prParsed) {
-            showUiAlert("Combined mode requires a valid GitHub PR URL or owner/repo#123.");
-            return;
-        }
-        parseMessage += " | PR: " + prParsed.owner + "/" + prParsed.repo + "#" + prParsed.prNum;
-    }
 
     confDisplay.textContent = parseMessage;
     confInfo.style.display = "block";
@@ -1421,6 +1500,263 @@ if (confluenceDeselectAllBtn) {
     confluenceDeselectAllBtn.addEventListener('click', () => {
         const activeList = getActiveConfluenceChecklistContainer();
         if (activeList) activeList.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+    });
+}
+
+var combinedReviewPanel = document.getElementById("combined-review-panel");
+var combinedReviewClose = document.getElementById("combined-review-close");
+var combinedBackToChatBtn = document.getElementById("combined-back-to-chat-btn");
+var combinedChangeModeBtn = document.getElementById("combined-change-mode-btn");
+var combinedPanelModal = combinedReviewPanel ? combinedReviewPanel.querySelector(".panel-modal") : null;
+var combinedConfluenceLinkInput = document.getElementById("combined-confluence-link-input");
+var combinedPrLinkInput = document.getElementById("combined-pr-link-input");
+var parseCombinedBtn = document.getElementById("parse-combined-btn");
+var combinedInfo = document.getElementById("combined-info");
+var combinedConfluenceDisplay = document.getElementById("combined-confluence-display");
+var combinedPrDisplay = document.getElementById("combined-pr-display");
+var startCombinedReviewBtn = document.getElementById("start-combined-review-btn");
+const combinedSelectAllBtn = document.getElementById("combined-select-all-btn");
+const combinedDeselectAllBtn = document.getElementById("combined-deselect-all-btn");
+
+if (combinedReviewPanel) {
+    combinedReviewPanel.addEventListener("click", function(event) {
+        if (event.target === combinedReviewPanel) {
+            combinedReviewPanel.style.display = "none";
+            mainChat.style.display = "flex";
+            sidebar.style.display = "";
+        }
+    });
+}
+if (combinedPanelModal) {
+    combinedPanelModal.addEventListener("click", function(event) {
+        event.stopPropagation();
+    });
+}
+if (combinedReviewClose) {
+    combinedReviewClose.addEventListener("click", function() {
+        combinedReviewPanel.style.display = "none";
+        mainChat.style.display = "flex";
+        sidebar.style.display = "";
+    });
+}
+if (combinedBackToChatBtn) {
+    combinedBackToChatBtn.addEventListener("click", function() {
+        combinedReviewPanel.style.display = "none";
+        mainChat.style.display = "flex";
+        sidebar.style.display = "";
+    });
+}
+if (combinedChangeModeBtn) {
+    combinedChangeModeBtn.addEventListener("click", function() {
+        openQuickReviewModal("combined");
+    });
+}
+if (combinedSelectAllBtn) {
+    combinedSelectAllBtn.addEventListener("click", function() {
+        var combinedChecklist = document.getElementById("combined-checklist-items");
+        if (combinedChecklist) {
+            combinedChecklist.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = true; });
+        }
+    });
+}
+if (combinedDeselectAllBtn) {
+    combinedDeselectAllBtn.addEventListener("click", function() {
+        var combinedChecklist = document.getElementById("combined-checklist-items");
+        if (combinedChecklist) {
+            combinedChecklist.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
+        }
+    });
+}
+if (parseCombinedBtn) {
+    parseCombinedBtn.addEventListener("click", function() {
+        var confParsed = parseConfluencePageLink(combinedConfluenceLinkInput ? combinedConfluenceLinkInput.value : "");
+        if (!confParsed) {
+            showUiAlert("Could not parse Confluence page. Use a URL containing /pages/<id> or ?pageId=<id>, or enter a numeric page ID.");
+            return;
+        }
+        var prParsed = parseGithubPrLink(combinedPrLinkInput ? combinedPrLinkInput.value : "");
+        if (!prParsed) {
+            showUiAlert("Could not parse GitHub PR link. Use a GitHub PR URL or owner/repo#123.");
+            return;
+        }
+        if (combinedConfluenceDisplay) combinedConfluenceDisplay.textContent = confParsed.pageId;
+        if (combinedPrDisplay) combinedPrDisplay.textContent = prParsed.owner + "/" + prParsed.repo + "#" + prParsed.prNum;
+        if (combinedInfo) combinedInfo.style.display = "block";
+    });
+}
+if (startCombinedReviewBtn) {
+    startCombinedReviewBtn.addEventListener("click", function() {
+        var confLink = combinedConfluenceLinkInput ? combinedConfluenceLinkInput.value.trim() : "";
+        var prLink = combinedPrLinkInput ? combinedPrLinkInput.value.trim() : "";
+        if (!confLink) { showUiAlert("Please enter a Confluence page URL or ID"); return; }
+        if (!prLink) { showUiAlert("Please enter a GitHub PR URL or ID"); return; }
+
+        var parsedPage = parseConfluencePageLink(confLink);
+        if (!parsedPage) {
+            showUiAlert("Could not parse page ID from input. Use /pages/<id>, ?pageId=<id>, or a numeric page ID.");
+            return;
+        }
+        var prMatch = parseGithubPrLink(prLink);
+        if (!prMatch) {
+            showUiAlert("Could not parse GitHub PR link. Use a GitHub PR URL or owner/repo#123.");
+            return;
+        }
+
+        var checklist = [];
+        var combinedChecklist = document.getElementById("combined-checklist-items");
+        if (combinedChecklist) {
+            combinedChecklist.querySelectorAll(".check-item").forEach(function(item) {
+                var cb = item.querySelector("input");
+                if (cb && cb.checked) {
+                    var selectedCheck = getChecklistItemValue(item);
+                    if (selectedCheck) checklist.push(selectedCheck);
+                }
+            });
+        }
+        if (checklist.length === 0) { showUiAlert("Please select at least one checklist item"); return; }
+
+        var outputs = [];
+        document.querySelectorAll("#combined-output-options .output-item").forEach(function(item) {
+            var cb = item.querySelector("input");
+            var span = item.querySelector("span");
+            if (cb && cb.checked && span) {
+                outputs.push(span.textContent.trim());
+            }
+        });
+        if (outputs.length === 0) { showUiAlert("Please select at least one expected output type"); return; }
+
+        var confluenceBaseUrl = parseConfluenceBaseUrlFromPageLink(confLink);
+        var githubBaseUrl = parseGithubApiBaseUrlFromPrLink(prLink);
+        var pageId = parsedPage.pageId;
+
+        var msg = "Review this Confluence page: " + confLink;
+        msg += "\n\nReview this GitHub PR: " + prMatch.url;
+        msg += "\n\nReview type: document and code";
+        msg += "\n\nExpected output:\n- " + outputs.join("\n- ");
+        msg += "\n\nChecklist items to review:\n- " + checklist.join("\n- ");
+
+        combinedReviewPanel.style.display = "none";
+        mainChat.style.display = "flex";
+        sidebar.style.display = "";
+
+        createUserMessageBubble(msg);
+        chatHistory.push({role: "user", text: msg});
+        requestHint.textContent = "Sending combined review request...";
+        requestHint.style.color = "#666";
+        reviewProgress.show("Combined document/code review", "Starting combined review...");
+
+        (async function() {
+            try {
+                var combinedPayload = withUserAuthPayload({
+                    conf_page_id: pageId,
+                    pr_owner: prMatch.owner,
+                    pr_repo: prMatch.repo,
+                    pr_number: prMatch.prNum,
+                    pr_checklist: checklist,
+                    conf_checklist: checklist,
+                    skip_inline: false,
+                    skip_footer: false,
+                    confluence_base_url: confluenceBaseUrl,
+                    github_base_url: githubBaseUrl
+                });
+
+                var combinedRes = await fetch("/api/combined-review-stream", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(combinedPayload)
+                });
+
+                if (!combinedRes.ok || !combinedRes.body) {
+                    throw new Error("Combined SSE unavailable");
+                }
+
+                const combinedReader = combinedRes.body.getReader();
+                const combinedDecoder = new TextDecoder();
+                let combinedBuffer = "";
+                reviewProgress.addLog("Combined review started...");
+
+                while (true) {
+                    const combinedChunk = await combinedReader.read();
+                    if (combinedChunk.done) break;
+
+                    combinedBuffer += combinedDecoder.decode(combinedChunk.value, {stream: true});
+                    const parts = combinedBuffer.split("\n\n");
+                    combinedBuffer = parts.pop();
+
+                    for (const part of parts) {
+                        if (!part.trim()) continue;
+
+                        let eventType = null;
+                        const dataLines = [];
+                        part.split("\n").forEach(function(line) {
+                            if (line.startsWith("event:")) {
+                                eventType = line.slice(6).trim();
+                            } else if (line.startsWith("data:")) {
+                                dataLines.push(line.slice(5).trim());
+                            }
+                        });
+
+                        if (!dataLines.length) continue;
+
+                        const payloadText = dataLines.join("\n");
+                        let payload;
+                        try {
+                            payload = JSON.parse(payloadText);
+                        } catch (parseErr) {
+                            payload = {message: payloadText};
+                        }
+
+                        var normalizedEventType = eventType || payload.type || "message";
+                        if (normalizedEventType === "progress") {
+                            normalizedEventType = "message";
+                        }
+
+                        if (normalizedEventType === "message" && payload.message) {
+                            reviewProgress.addLog(payload.message, payload.level || "info");
+                            requestHint.textContent = payload.message;
+                            requestHint.style.color = "#666";
+                        } else if (normalizedEventType === "done") {
+                            var doneText = payload.message || "Combined review complete.";
+                            reviewProgress.addLog(doneText, "success");
+                            reviewProgress.setTitle("Review complete");
+                            reviewProgress.setState("success");
+                            reviewProgress.hide();
+                            requestHint.textContent = "Review complete";
+                            requestHint.style.color = "#2e7d32";
+                            createAssistantMessageBubble(doneText);
+                            chatHistory.push({role: "assistant", text: doneText});
+                        } else if (normalizedEventType === "error") {
+                            if (String(payload.level || "").toLowerCase() === "warning") {
+                                var combinedWarn = toActionableErrorMessage(payload.message || payload.error || "Warning");
+                                reviewProgress.addLog(combinedWarn, "warning");
+                                requestHint.textContent = "Completed with warnings";
+                                requestHint.style.color = "#b26a00";
+                            } else {
+                                var combinedErr = toActionableErrorMessage(payload.message || payload.error || "Combined review failed");
+                                markConnectionStatusFromError(combinedErr);
+                                reviewProgress.addLog(combinedErr, "error");
+                                reviewProgress.setTitle("Review failed");
+                                reviewProgress.setState("error");
+                                requestHint.textContent = "Review failed";
+                                requestHint.style.color = "#d32f2f";
+                                createAssistantMessageBubble(combinedErr);
+                                chatHistory.push({role: "assistant", text: combinedErr});
+                            }
+                        }
+                    }
+                }
+            } catch (streamErr) {
+                var combinedMsg = toActionableErrorMessage(streamErr && streamErr.message ? streamErr.message : "Combined review failed");
+                markConnectionStatusFromError(combinedMsg);
+                reviewProgress.addLog(combinedMsg, "error");
+                reviewProgress.setTitle("Review failed");
+                reviewProgress.setState("error");
+                requestHint.textContent = "Review failed";
+                requestHint.style.color = "#d32f2f";
+                createAssistantMessageBubble(combinedMsg);
+                chatHistory.push({role: "assistant", text: combinedMsg});
+            }
+        })();
     });
 }
 
@@ -1495,7 +1831,7 @@ confStartBtn.addEventListener("click", function() {
     });
     if (outputs.length === 0) { showUiAlert("Please select at least one expected output type"); return; }
 
-    var currentMode = quickReviewMode || "combined";
+    var currentMode = "confluence";
     var prLink = confPrLinkInput ? confPrLinkInput.value.trim() : "";
     var prMatch = null;
     if (currentMode === "combined") {
@@ -1612,15 +1948,22 @@ confStartBtn.addEventListener("click", function() {
                             createAssistantMessageBubble(doneText);
                             chatHistory.push({role: "assistant", text: doneText});
                         } else if (normalizedEventType === "error") {
-                            var combinedErr = toActionableErrorMessage(payload.message || payload.error || "Combined review failed");
-                            markConnectionStatusFromError(combinedErr);
-                            reviewProgress.addLog(combinedErr, "error");
-                            reviewProgress.setTitle("Review failed");
-                            reviewProgress.setState("error");
-                            requestHint.textContent = "Review failed";
-                            requestHint.style.color = "#d32f2f";
-                            createAssistantMessageBubble(combinedErr);
-                            chatHistory.push({role: "assistant", text: combinedErr});
+                            if (String(payload.level || "").toLowerCase() === "warning") {
+                                var combinedWarn = toActionableErrorMessage(payload.message || payload.error || "Warning");
+                                reviewProgress.addLog(combinedWarn, "warning");
+                                requestHint.textContent = "Completed with warnings";
+                                requestHint.style.color = "#b26a00";
+                            } else {
+                                var combinedErr = toActionableErrorMessage(payload.message || payload.error || "Combined review failed");
+                                markConnectionStatusFromError(combinedErr);
+                                reviewProgress.addLog(combinedErr, "error");
+                                reviewProgress.setTitle("Review failed");
+                                reviewProgress.setState("error");
+                                requestHint.textContent = "Review failed";
+                                requestHint.style.color = "#d32f2f";
+                                createAssistantMessageBubble(combinedErr);
+                                chatHistory.push({role: "assistant", text: combinedErr});
+                            }
                         }
                     }
                 }
@@ -1736,7 +2079,13 @@ confStartBtn.addEventListener("click", function() {
                             reviewProgress.addLog(payload.message, payload.level || "success");
                         }
                     } else if (eventType === "error") {
-                        throw new Error(payload.error || payload.message || "Review failed");
+                        if (String(payload.level || "").toLowerCase() === "warning") {
+                            reviewProgress.addLog(payload.message || payload.error || "Warning", "warning");
+                            requestHint.textContent = "Completed with warnings";
+                            requestHint.style.color = "#b26a00";
+                        } else {
+                            throw new Error(payload.error || payload.message || "Review failed");
+                        }
                     }
                 }
             }

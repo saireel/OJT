@@ -1788,6 +1788,9 @@ body {
     color: #d32f2f;
 }
 
+.review-progress-entry.warning {
+    color: #b26a00;
+}
 
 .quick-review-modal-content {
     width: min(860px, 96vw);

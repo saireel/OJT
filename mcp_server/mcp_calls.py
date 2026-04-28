@@ -6,9 +6,9 @@ import html
 import re
 from typing import Any, Dict, List
 
-from confluence_reviewer import confluence_api, ReviewActions, SyntaxActions
-from github_reviewer import github_api
-from combined_review.combined_review import execute_combined_check
+from mcp_server.confluence_reviewer import confluence_api, ReviewActions, SyntaxActions
+from mcp_server.github_reviewer import github_api
+from mcp_server.combined_review.combined_review import execute_combined_check
 
 # Shared instances (created once, reused across all calls)
 syntax_actions = SyntaxActions(confluence_api)

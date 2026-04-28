@@ -304,6 +304,31 @@ def _build_agent_prompt(
         + f"\n\n[Agent step {step + 1}] What do you do next?"
     )
 
+def _emit_progress(
+    progress_callback,
+    message: str,
+    *,
+    level: str = "info",
+    phase: str = "",
+    step: int | None = None,
+    total_steps: int | None = None,
+    tool: str = "",
+) -> None:
+    if not progress_callback:
+        return
+    payload = {"message": str(message)}
+    if level:
+        payload["level"] = level
+    if phase:
+        payload["phase"] = phase
+    if isinstance(step, int):
+        payload["step"] = str(step)
+    if isinstance(total_steps, int):
+        payload["total_steps"] = str(total_steps)
+    if tool:
+        payload["tool"] = tool
+    progress_callback(payload)
+
 def run_agent(user_msg: str, history: list, link_context: str, request_meta: dict | None = None, progress_callback=None) -> str:
     """
     ReAct + Verify-Then-Continue agent loop.
@@ -374,6 +399,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
     # OPTIMIZATION: Detect combined document/code reviews early and run both tools directly.
     if wants_combined_review:
         print("[AGENT] Detected combined document/code review request - calling Confluence and PR tools directly", flush=True)
+        _emit_progress(progress_callback, "Detected combined document/code review request.", phase="detect")
         pr = prs[0]
         page_id = str(page_ids[0])
         repo_full = f"{pr['owner']}/{pr['repo']}"
@@ -386,19 +412,23 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         
         def _run_confluence_review():
             try:
+                _emit_progress(progress_callback, "Running Confluence review...", phase="tool", tool="review_confluence")
                 result = TOOL_REGISTRY["review_confluence"]({
                     "page_id": page_id,
                     "checklist_page_id": confluence_checklist_page_id,
                     "skip_inline": skip_inline,
                     "skip_footer": False,
                 })
+                _emit_progress(progress_callback, "Confluence review completed.", phase="tool", level="success", tool="review_confluence")
                 result_queue.put(("confluence", result))
             except Exception as e:
                 print(f"[AGENT] Confluence review error: {e}", flush=True)
+                _emit_progress(progress_callback, f"Confluence review failed: {e}", phase="tool", level="warning", tool="review_confluence")
                 result_queue.put(("confluence", {"success": False, "error": str(e)}))
         
         def _run_pr_review():
             try:
+                _emit_progress(progress_callback, "Running pull request review...", phase="tool", tool="review_pull_request")
                 result = TOOL_REGISTRY["review_pull_request"]({
                     "repo": repo_full,
                     "pr_number": int(pr["pr_number"]),
@@ -406,9 +436,11 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                     "skip_inline": skip_inline,
                     "skip_footer": False,
                 })
+                _emit_progress(progress_callback, "Pull request review completed.", phase="tool", level="success", tool="review_pull_request")
                 result_queue.put(("pr", result))
             except Exception as e:
                 print(f"[AGENT] PR review error: {e}", flush=True)
+                _emit_progress(progress_callback, f"Pull request review failed: {e}", phase="tool", level="warning", tool="review_pull_request")
                 result_queue.put(("pr", {"success": False, "error": str(e)}))
         
         # Start both threads
@@ -419,6 +451,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         
         # Wait for both to complete
         print("[AGENT] Running Confluence and PR reviews in parallel...", flush=True)
+        _emit_progress(progress_callback, "Running Confluence and PR reviews in parallel.", phase="tool")
         confluence_thread.join()
         pr_thread.join()
         
@@ -470,6 +503,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
     is_pr_review = "PR:" in link_context and any(term in user_msg.lower() for term in ["review", "check", "audit", "inspect"])
     if is_pr_review:
         print("[AGENT] Detected PR review request - calling review_pull_request directly", flush=True)
+        _emit_progress(progress_callback, "Detected PR review request.", phase="detect")
         pr_matches = re.findall(r"PR: ([^/]+)/([^#]+)#(\d+)", link_context)
         if pr_matches:
             owner, repo, pr_num = pr_matches[0]
@@ -488,11 +522,13 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                     "checklist": checklist,
                 })
 
+            _emit_progress(progress_callback, f"Running PR review for {repo_full}#{pr_num}.", phase="tool", tool="review_pull_request")
             started_at = time.time()
             result, reused_inflight, waited_s = _run_review_with_coalescing(review_key, _invoke_direct_review)
             elapsed_ms = int((time.time() - started_at) * 1000)
             elapsed_s = elapsed_ms / 1000
             if isinstance(result, dict) and result.get("success"):
+                _emit_progress(progress_callback, "PR review completed.", phase="complete", level="success", tool="review_pull_request")
                 data = result.get("data", {})
                 summary = data.get("summary", "") if isinstance(data, dict) else str(data)
                 reviewed = data.get("reviewed_items", []) if isinstance(data, dict) else []
@@ -510,13 +546,19 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                 return "\n".join(lines)
             else:
                 error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
+                _emit_progress(progress_callback, f"PR review failed: {error}", phase="complete", level="error", tool="review_pull_request")
                 return f"PR review for {repo_full}#{pr_num} failed: {error}"
     
     step_budget = _step_budget_for_request(user_msg)
     for step in range(step_budget):
         print(f"[AGENT] Step {step + 1}/{step_budget}", flush=True)
-        if progress_callback:
-            progress_callback(f"Thinking... (step {step + 1})")
+        _emit_progress(
+            progress_callback,
+            f"Analyzing request (step {step + 1}/{step_budget}).",
+            phase="llm",
+            step=step + 1,
+            total_steps=step_budget,
+        )
         prompt = _build_agent_prompt(
             AGENT_SYSTEM_PROMPT,
             link_context,
@@ -527,6 +569,13 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         )
         response, err = call_llm(prompt)
         print(f"[AGENT] LLM response (step {step + 1}): {response[:600]}", flush=True)
+        _emit_progress(
+            progress_callback,
+            f"Model response received for step {step + 1}.",
+            phase="llm",
+            step=step + 1,
+            total_steps=step_budget,
+        )
         if err:
             return f"Sorry, I encountered an error: {err}"
         if not response.strip():
@@ -536,6 +585,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         if final_match:
             final_answer = final_match.group(1).strip()
             print(f"[AGENT] Final answer at step {step + 1}", flush=True)
+            _emit_progress(progress_callback, "Final answer ready.", phase="complete", level="success", step=step + 1, total_steps=step_budget)
             return final_answer
         # --- Check for TOOL_CALL ---
         tool_match = re.search(r"TOOL_CALL:\s*(.+?)\s*(?:\n|$)", response)
@@ -560,9 +610,15 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
             scratchpad.append({"tool": tool_name, "input": args, "output": observation})
             continue
         print(f"[AGENT] Calling tool: {tool_name} | args: {json.dumps(args, default=str)[:300]}", flush=True)
-        if progress_callback:
-            _tool_label = tool_name.replace("_", " ")
-            progress_callback(f"Using tool: {_tool_label}...")
+        _tool_label = tool_name.replace("_", " ")
+        _emit_progress(
+            progress_callback,
+            f"Calling tool: {_tool_label}.",
+            phase="tool",
+            step=step + 1,
+            total_steps=step_budget,
+            tool=tool_name,
+        )
         # --- Execute tool ---
         if tool_name == "post_confluence_inline_comment" and args.get("page_id") and args.get("text_selection"):
             # Prevent repeated comments on match_index=0 by auto-advancing match_index.
@@ -628,6 +684,15 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                     "output": f"Batch progress: total_occurrences={total_occurrences}, completed={done_now}, remaining={remaining}. Continue if remaining > 0.",
                     "raw_result": {"success": True},
                 })
+                _emit_progress(
+                    progress_callback,
+                    f"Inline comment batch progress: {done_now}/{total_occurrences} completed.",
+                    phase="tool",
+                    level="success" if remaining == 0 else "info",
+                    step=step + 1,
+                    total_steps=step_budget,
+                    tool=tool_name,
+                )
             continue
         result = TOOL_REGISTRY[tool_name](args)
         print(f"[AGENT] Tool result: {str(result)[:400]}", flush=True)
@@ -645,8 +710,29 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
             "output": observation,
             "raw_result": result,
         })
+        if isinstance(result, dict) and result.get("success"):
+            _emit_progress(
+                progress_callback,
+                f"Tool completed: {_tool_label}.",
+                phase="tool",
+                level="success",
+                step=step + 1,
+                total_steps=step_budget,
+                tool=tool_name,
+            )
+        else:
+            _emit_progress(
+                progress_callback,
+                f"Tool attempt failed: {_tool_label}. Continuing...",
+                phase="tool",
+                level="warning",
+                step=step + 1,
+                total_steps=step_budget,
+                tool=tool_name,
+            )
     # --- MAX_STEPS reached: return deterministic execution report ---
     print(f"[AGENT] Max steps ({step_budget}) reached. Returning deterministic execution summary.", flush=True)
+    _emit_progress(progress_callback, f"Reached max steps ({step_budget}); returning execution summary.", phase="complete", level="error", total_steps=step_budget)
     if scratchpad:
         return _build_deterministic_execution_summary(user_msg, scratchpad)
     return "No tool actions were executed before reaching the step limit."
