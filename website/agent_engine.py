@@ -4,12 +4,11 @@ import time
 
 try:
     from .mcp_runtime import TOOL_REGISTRY, call_llm
-    from .review_logic import (_get_cached_pr_checklist, _make_review_coalesce_key, _run_review_with_coalescing, _step_budget_for_request, _build_checklist_from_panel)
+    from .review_logic import (_get_cached_pr_checklist, _step_budget_for_request, _build_checklist_from_panel)
 except ImportError:
     from mcp_runtime import TOOL_REGISTRY, call_llm
     from review_logic import (_get_cached_pr_checklist, _make_review_coalesce_key, _run_review_with_coalescing, _step_budget_for_request, _build_checklist_from_panel)
-import threading
-import queue
+
 
 AGENT_SYSTEM_PROMPT = """You are an autonomous AI agent called MunnAI.
 
@@ -93,6 +92,8 @@ AVAILABLE TOOLS:
 
 16. add_inline_comment
    - Add an inline comment on a specific line in a PR.
+   - Parameters: repo, pr_number, head_sha, comment_body, selected_path, start_line, end_line, side
+   - Example: {"repo": "owner/repo", "pr_number": 2, "head_sha": "abc123...", "comment_body": "Issue: ...", "selected_path": "config.py", "start_line": 5, "end_line": 5, "side": "RIGHT"}
 
 17. show_comments
    - Get all comments on a PR.
@@ -117,8 +118,6 @@ AVAILABLE TOOLS:
 
 24. set_runtime_auth
    - Set runtime authentication credentials for GitHub and Confluence.
-
-
 
 25. get_page_content_by_sections
    - Get content of a Confluence page by sections (chunked).
@@ -158,15 +157,6 @@ AVAILABLE TOOLS:
 
 ---
    - Set runtime authentication credentials for GitHub and Confluence.
-
-
----
-
-COMBINED REVIEW WORKFLOW
-When the user asks for a combined review: review a confluence page with a github pull request:
-    1. Fetch both PR and Confluence content upfront
-    2. For each selected check, pass BOTH sources for cross-checking
-    3. Aggregate and return results
 ---
 
 PR REVIEW WORKFLOW:
@@ -360,6 +350,7 @@ def _emit_progress(
     total_steps: int | None = None,
     tool: str = "",
 ) -> None:
+    
     if not progress_callback:
         return
     payload = {"message": str(message)}
@@ -374,6 +365,37 @@ def _emit_progress(
     if tool:
         payload["tool"] = tool
     progress_callback(payload)
+
+def _normalize_tool_args(tool_name: str, args: dict) -> dict:
+    """Map outdated parameter names to current schema."""
+    # Create a copy to avoid modifying the original
+    normalized = dict(args)
+    
+    # PR inline comment parameter mappings
+    if tool_name in ["add_inline_comment", "mcp_confluence_tool_add_inline_comment"]:
+        # Old name -> new name mappings
+        if "path" in normalized and "selected_path" not in normalized:
+            normalized["selected_path"] = normalized.pop("path")
+        if "body" in normalized and "comment_body" not in normalized:
+            normalized["comment_body"] = normalized.pop("body")
+        if "commit_id" in normalized and "head_sha" not in normalized:
+            normalized["head_sha"] = normalized.pop("commit_id")
+        if "line" in normalized and "start_line" not in normalized:
+            normalized["start_line"] = normalized.pop("line")
+            # If only line exists, use it for both start and end
+            if "end_line" not in normalized:
+                normalized["end_line"] = normalized["start_line"]
+        if "side" not in normalized:
+            normalized["side"] = "RIGHT"  # Default side
+    
+    # Confluence inline comment parameter mappings
+    if tool_name == "post_inline_comment":
+        if "text" in normalized and "text_selection" not in normalized:
+            normalized["text_selection"] = normalized.pop("text")
+        if "match" in normalized and "match_index" not in normalized:
+            normalized["match_index"] = normalized.pop("match")
+    
+    return normalized
 
 def run_agent(user_msg: str, history: list, link_context: str, request_meta: dict | None = None, progress_callback=None) -> str:
     """
@@ -441,159 +463,6 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         reviewed = data.get("reviewed_items", []) or []
         reviewed = [str(item) for item in reviewed if str(item).strip()]
         return True, summary, reviewed
-
-    # OPTIMIZATION: Detect combined document/code reviews early and run both tools directly.
-    if wants_combined_review:
-        print("[AGENT] Detected combined document/code review request - calling Confluence and PR tools directly", flush=True)
-        _emit_progress(progress_callback, "Detected combined document/code review request.", phase="detect")
-        pr = prs[0]
-        page_id = str(page_ids[0])
-        repo_full = f"{pr['owner']}/{pr['repo']}"
-        skip_inline = not wants_inline
-
-        # Run both reviews in parallel using threads (non-blocking)
-        result_queue = queue.Queue()
-        confluence_result = None
-        pr_result = None
-        
-        def _run_confluence_review():
-            try:
-                _emit_progress(progress_callback, "Running Confluence review...", phase="tool", tool="review_confluence")
-                result = TOOL_REGISTRY["review_confluence"]({
-                    "page_id": page_id,
-                    "checklist_page_id": confluence_checklist_page_id,
-                    "skip_inline": skip_inline,
-                    "skip_footer": False,
-                })
-                _emit_progress(progress_callback, "Confluence review completed.", phase="tool", level="success", tool="review_confluence")
-                result_queue.put(("confluence", result))
-            except Exception as e:
-                print(f"[AGENT] Confluence review error: {e}", flush=True)
-                _emit_progress(progress_callback, f"Confluence review failed: {e}", phase="tool", level="warning", tool="review_confluence")
-                result_queue.put(("confluence", {"success": False, "error": str(e)}))
-        
-        def _run_pr_review():
-            try:
-                _emit_progress(progress_callback, "Running pull request review...", phase="tool", tool="review_pull_request")
-                result = TOOL_REGISTRY["review_pull_request"]({
-                    "repo": repo_full,
-                    "pr_number": int(pr["pr_number"]),
-                    "checklist": pr_checklist,
-                    "skip_inline": skip_inline,
-                    "skip_footer": False,
-                })
-                _emit_progress(progress_callback, "Pull request review completed.", phase="tool", level="success", tool="review_pull_request")
-                result_queue.put(("pr", result))
-            except Exception as e:
-                print(f"[AGENT] PR review error: {e}", flush=True)
-                _emit_progress(progress_callback, f"Pull request review failed: {e}", phase="tool", level="warning", tool="review_pull_request")
-                result_queue.put(("pr", {"success": False, "error": str(e)}))
-        
-        # Start both threads
-        confluence_thread = threading.Thread(target=_run_confluence_review, daemon=True)
-        pr_thread = threading.Thread(target=_run_pr_review, daemon=True)
-        confluence_thread.start()
-        pr_thread.start()
-        
-        # Wait for both to complete
-        print("[AGENT] Running Confluence and PR reviews in parallel...", flush=True)
-        _emit_progress(progress_callback, "Running Confluence and PR reviews in parallel.", phase="tool")
-        confluence_thread.join()
-        pr_thread.join()
-        
-        # Collect results from queue
-        while not result_queue.empty():
-            review_type, result = result_queue.get_nowait()
-            if review_type == "confluence":
-                confluence_result = result
-            elif review_type == "pr":
-                pr_result = result
-
-        confluence_ok, confluence_summary, confluence_reviewed = _render_tool_summary(
-            confluence_result,
-            f"Review comments and a footer summary have been posted to Confluence page {page_id}.",
-        )
-        pr_ok, pr_summary, pr_reviewed = _render_tool_summary(
-            pr_result,
-            f"Review comments and a footer summary have been posted to PR {repo_full}#{pr['pr_number']}.",
-        )
-
-        lines = [
-            f"Completed combined document/code review for {repo_full}#{pr['pr_number']} and Confluence page {page_id}.",
-        ]
-        if review_type:
-            lines.append(f"Review type: {review_type}")
-        elif doc_type:
-            lines.append(f"Document type: {doc_type}")
-        if checklist_input:
-            lines.append(f"Checklist items: {', '.join(str(item) for item in checklist_input)}")
-        if outputs:
-            lines.append(f"Expected outputs: {', '.join(str(item) for item in outputs)}")
-        lines.append("")
-        lines.append(f"Confluence page {page_id}:")
-        lines.append(f"- Status: {'success' if confluence_ok else 'failed'}")
-        if confluence_reviewed:
-            lines.append(f"- Reviewed: {', '.join(confluence_reviewed)}")
-        lines.append(f"- {confluence_summary}")
-        lines.append("")
-        lines.append(f"GitHub PR {repo_full}#{pr['pr_number']}:")
-        lines.append(f"- Status: {'success' if pr_ok else 'failed'}")
-        if pr_reviewed:
-            lines.append(f"- Reviewed: {', '.join(pr_reviewed)}")
-        lines.append(f"- {pr_summary}")
-        lines.append("")
-        lines.append("Footer summaries were posted to both the Confluence page and the PR.")
-        return "\n".join(lines)
-
-    # OPTIMIZATION: Detect PR reviews early and call tool directly (skip LLM)
-   # is_pr_review = "PR:" in link_context and any(term in user_msg.lower() for term in ["review", "check", "audit", "inspect"])
-   # if is_pr_review:
-        print("[AGENT] Detected PR review request - calling review_pull_request directly", flush=True)
-        _emit_progress(progress_callback, "Detected PR review request.", phase="detect")
-        pr_matches = re.findall(r"PR: ([^/]+)/([^#]+)#(\d+)", link_context)
-        if pr_matches:
-            owner, repo, pr_num = pr_matches[0]
-            repo_full = f"{owner}/{repo}"
-            checklist = pr_checklist  # Use user-selected checklist, not default
-            review_key = _make_review_coalesce_key(
-                repo_full,
-                int(pr_num),
-                checklist=checklist,
-            )
-
-            def _invoke_direct_review():
-                return TOOL_REGISTRY["review_pull_request"]({
-                    "repo": repo_full,
-                    "pr_number": int(pr_num),
-                    "checklist": checklist,
-                })
-
-            _emit_progress(progress_callback, f"Running PR review for {repo_full}#{pr_num}.", phase="tool", tool="review_pull_request")
-            started_at = time.time()
-            result, reused_inflight, waited_s = _run_review_with_coalescing(review_key, _invoke_direct_review)
-            elapsed_ms = int((time.time() - started_at) * 1000)
-            elapsed_s = elapsed_ms / 1000
-            if isinstance(result, dict) and result.get("success"):
-                _emit_progress(progress_callback, "PR review completed.", phase="complete", level="success", tool="review_pull_request")
-                data = result.get("data", {})
-                summary = data.get("summary", "") if isinstance(data, dict) else str(data)
-                reviewed = data.get("reviewed_items", []) if isinstance(data, dict) else []
-                lines = [
-                    f"Completed PR review for {repo_full}#{pr_num} in {elapsed_s:.1f}s.",
-                ]
-                if reused_inflight:
-                    lines.append(f"Reused an in-flight review result (waited {waited_s:.1f}s).")
-                if reviewed:
-                    lines.append(f"Reviewed: {', '.join(reviewed)}")
-       #         if summary:
-      #              lines.append(summary)
-     #           else:
-   ##                 lines.append("Review comments (inline + summary) have been posted to the PR.")
-  #              return "\n".join(lines)
- #           else:
-#                error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
-    #            _emit_progress(progress_callback, f"PR review failed: {error}", phase="complete", level="error", tool="review_pull_request")
- #               return f"PR review for {repo_full}#{pr_num} failed: {error}"
     
     step_budget = _step_budget_for_request(user_msg)
     for step in range(step_budget):
@@ -650,11 +519,16 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                 observation = f"ERROR: Could not parse ARGS as JSON: {e}. Raw: {args_match.group(1)}"
                 scratchpad.append({"tool": tool_name, "input": args_match.group(1), "output": observation})
                 continue
+
         # --- Validate tool ---
         if tool_name not in TOOL_REGISTRY:
             observation = f"ERROR: Unknown tool '{tool_name}'. Available: {', '.join(TOOL_REGISTRY.keys())}"
             scratchpad.append({"tool": tool_name, "input": args, "output": observation})
             continue
+        
+        # NORMALIZE outdated parameter names
+        args = _normalize_tool_args(tool_name, args)
+        
         print(f"[AGENT] Calling tool: {tool_name} | args: {json.dumps(args, default=str)[:300]}", flush=True)
         _tool_label = tool_name.replace("_", " ")
         _emit_progress(
@@ -740,6 +614,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                     tool=tool_name,
                 )
             continue
+
         result = TOOL_REGISTRY[tool_name](args)
         print(f"[AGENT] Tool result: {str(result)[:400]}", flush=True)
         # --- Format observation ---
@@ -776,6 +651,7 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                 total_steps=step_budget,
                 tool=tool_name,
             )
+
         # --- MAX_STEPS reached: return deterministic execution report ---
     print(f"[AGENT] Max steps ({step_budget}) reached. Building final summary.", flush=True)
     _emit_progress(progress_callback, f"Reached max steps ({step_budget}); generating final summary.", phase="complete")
@@ -842,30 +718,4 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
     
     return user_friendly_summary
 
-def _clean_review_line(line: str) -> str | None:
-    """Clean a raw [REVIEW] stderr line for user-friendly SSE display.
-
-    Returns cleaned text or None to suppress the line entirely.
-    """
-    # Skip duplicate INFO:/DEBUG: prefixed lines (they repeat the [REVIEW] message)
-    if line.lstrip().startswith(("INFO:", "DEBUG:")):
-        return None
-    # Extract the message after [REVIEW]
-    idx = line.find("[REVIEW]")
-    if idx < 0:
-        return None
-    msg = line[idx + len("[REVIEW]"):].strip()
-    if not msg:
-        return None
-    # Suppress noisy per-comment lines
-    if msg.startswith("Inline comment posted"):
-        return None  # batched into a counter instead
-    if msg.startswith("Inline anchor failed"):
-        return None
-    # Clean up common prefixes for readability
-    if msg.startswith(">>>"):
-        msg = msg.replace(">>>", "▶", 1)  # ▶
-    if msg.startswith("<<<"):
-        msg = msg.replace("<<<", "✅", 1)  # ✅
-    return f"  {msg}"
 

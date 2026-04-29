@@ -242,57 +242,6 @@ def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_secti
         return {"success": True, "data": text}
     return {"success": False, "error": error or "Failed to get page content"}
 
-def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "", skip_inline: bool = True, skip_footer: bool = False, _user_auth: dict | None = None) -> Dict[str, Any]:
-    source = page_input or page_id
-    page_ids = _extract_confluence_page_ids(source)
-    if not page_ids:
-        return {
-            "success": False,
-            "error": "No valid Confluence page IDs found. Pass a page ID, a Confluence page URL, or multiple values separated by commas/newlines.",
-        }
-
-    if len(page_ids) == 1:
-        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer, user_auth=_user_auth)
-        if result is not None:
-            return {"success": True, "data": result}
-        return {"success": False, "error": error or "Failed to review confluence page"}
-
-    reviewed = []
-    failed = []
-    for pid in page_ids:
-        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer, user_auth=_user_auth)
-        if result is not None:
-            reviewed.append(result)
-        else:
-            failed.append({
-                "page_id": pid,
-                "error": error or "Failed to review confluence page",
-            })
-
-    if reviewed:
-        return {
-            "success": True,
-            "data": {
-                "mode": "batch",
-                "requested": len(page_ids),
-                "reviewed_count": len(reviewed),
-                "failed_count": len(failed),
-                "results": reviewed,
-                "errors": failed,
-            },
-        }
-
-    return {
-        "success": False,
-        "error": "Failed to review all provided pages",
-        "data": {
-            "mode": "batch",
-            "requested": len(page_ids),
-            "reviewed_count": 0,
-            "failed_count": len(failed),
-            "errors": failed,
-        },
-    }
 
 def post_footer_comment(page_id: str, comment: str, _user_auth: dict | None = None) -> Dict[str, Any]:
     # Create fresh instance per request to avoid race conditions
@@ -596,18 +545,11 @@ def check_code_path_sections(pr_content, pr_sha, conf_content, conf_page_id, rep
         return execute_combined_check("code_path_sections", repo, pr_sha, pr_content, conf_content)
     except Exception as e:
         return {"compliant": False, "error": str(e)}
-def cleanup_old_bot_comments(
-    repo: str,
-    pr_number: int,
-    keep_latest: int = 1,
-    include_inline: bool = False,
-):
+
+def cleanup_old_bot_comments(repo: str, pr_number: int, keep_latest: int = 1, include_inline: bool = False):
     try:
         result = github_api.cleanup_old_bot_comments(
-            repo,
-            pr_number,
-            keep_latest,
-            include_inline,
+            repo, pr_number, keep_latest,include_inline,
         )
         return {"success": True, "data": result}
     except Exception as e:
@@ -630,170 +572,6 @@ def _truncate_text(value: str, limit: int) -> str:
         return value
     return value[: max(0, limit - 3)] + "..."
 
-
-def summarize_pr_and_confluence(
-    repo: str = "",
-    pr_number: int = 0,
-    page_id: str = "",
-    max_files: int = 6,
-    max_chars_per_file: int = 2000,
-    max_page_chars: int = 8000,
-) -> Dict[str, Any]:
-    """Summarize a GitHub PR, a Confluence page, or both in a single response."""
-    repo = (repo or "").strip()
-    page_id = str(page_id or "").strip()
-    has_pr = bool(repo and int(pr_number or 0) > 0)
-    has_page = bool(page_id)
-
-    if repo and not int(pr_number or 0):
-        return {"success": False, "error": "pr_number is required when repo is provided"}
-    if int(pr_number or 0) and not repo:
-        return {"success": False, "error": "repo is required when pr_number is provided"}
-    if not has_pr and not has_page:
-        return {"success": False, "error": "Provide either repo + pr_number, page_id, or both"}
-
-    if max_files < 1:
-        max_files = 1
-    if max_chars_per_file < 200:
-        max_chars_per_file = 200
-    if max_page_chars < 500:
-        max_page_chars = 500
-
-    pr_data: Dict[str, Any] | None = None
-    confluence_data: Dict[str, Any] | None = None
-    summary_sections: List[str] = []
-
-    if has_pr:
-        files_result = get_files_in_pr(repo, int(pr_number))
-        if not files_result.get("success"):
-            return files_result
-
-        files = files_result.get("data") or []
-        additions = sum(int(f.get("additions") or 0) for f in files if isinstance(f, dict))
-        deletions = sum(int(f.get("deletions") or 0) for f in files if isinstance(f, dict))
-
-        ext_counts: Dict[str, int] = {}
-        for item in files:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("filename") or "")
-            ext = "(no-ext)"
-            if "." in name.rsplit("/", 1)[-1]:
-                ext = name.rsplit(".", 1)[-1].lower()
-            ext_counts[ext] = ext_counts.get(ext, 0) + 1
-
-        dominant_ext = "mixed"
-        if ext_counts:
-            dominant_ext = max(ext_counts.items(), key=lambda kv: kv[1])[0]
-
-        head_sha = None
-        sha_result = get_base_and_head_sha(repo, int(pr_number))
-        if sha_result.get("success") and isinstance(sha_result.get("data"), dict):
-            head_sha = sha_result["data"].get("head_sha")
-
-        content_samples: List[Dict[str, Any]] = []
-        if head_sha:
-            for item in files:
-                if len(content_samples) >= max_files:
-                    break
-                if not isinstance(item, dict):
-                    continue
-                filename = str(item.get("filename") or "").strip()
-                status = str(item.get("status") or "")
-                if not filename or status == "removed":
-                    continue
-                fetched = get_file_content_at_ref(repo, filename, head_sha)
-                if not fetched.get("success"):
-                    continue
-                raw_text = str(fetched.get("data") or "")
-                sample = _truncate_text(raw_text, max_chars_per_file)
-                content_samples.append({
-                    "filename": filename,
-                    "status": status or "modified",
-                    "sample": sample,
-                })
-
-        top_files = sorted(
-            [f for f in files if isinstance(f, dict)],
-            key=lambda f: int(f.get("changes") or (int(f.get("additions") or 0) + int(f.get("deletions") or 0))),
-            reverse=True,
-        )[:5]
-        top_file_lines = [
-            f"- {f.get('filename')} (+{int(f.get('additions') or 0)} / -{int(f.get('deletions') or 0)})"
-            for f in top_files
-        ]
-        sample_lines = [f"- {s['filename']}: {len(s['sample'])} chars sampled" for s in content_samples]
-
-        pr_data = {
-            "repo": repo,
-            "pr_number": int(pr_number),
-            "file_count": len(files),
-            "additions": additions,
-            "deletions": deletions,
-            "dominant_extension": dominant_ext,
-            "top_files": top_files,
-            "content_samples": content_samples,
-        }
-        summary_sections.extend([
-            "## PR Summary",
-            f"- Repository: {repo}",
-            f"- PR Number: {int(pr_number)}",
-            f"- Files changed: {len(files)}",
-            f"- Net diff: +{additions} / -{deletions}",
-            f"- Dominant file type: {dominant_ext}",
-            "- Top changed files:",
-            *(top_file_lines or ["- (none)"]),
-            *( [""] + sample_lines if sample_lines else ["", "- No file content samples were retrieved."] ),
-            "",
-        ])
-
-    if has_page:
-        page_result = get_page_content_by_sections(page_id)
-        if not page_result.get("success"):
-            return page_result
-
-        page_storage = str(page_result.get("data") or "")
-        page_plain = _strip_html_to_text(page_storage)
-        page_excerpt = _truncate_text(page_plain, max_page_chars)
-        headings = re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", page_storage, flags=re.IGNORECASE | re.DOTALL)
-        headings = [_strip_html_to_text(h) for h in headings if _strip_html_to_text(h)]
-
-        confluence_data = {
-            "page_id": page_id,
-            "page_excerpt": page_excerpt,
-            "headings": headings[:20],
-        }
-        summary_sections.extend([
-            "## Confluence Page Summary",
-            f"- Page ID: {page_id}",
-            f"- Headings found: {len(headings)}",
-            *( [f"- Heading: {h}" for h in headings[:8]] or ["- Heading: (none detected)"] ),
-            "",
-            "## Confluence Excerpt",
-            page_excerpt or "(empty page content)",
-            "",
-        ])
-
-    if has_pr and has_page:
-        summary_sections.extend([
-            "## Combined Highlights",
-            "- PR and page were both retrieved successfully.",
-            f"- PR files sampled: {len((pr_data or {}).get('content_samples', []))}.",
-            f"- Page headings detected: {len((confluence_data or {}).get('headings', []))}.",
-        ])
-
-    return {
-        "success": True,
-        "data": {
-            "mode": "combined" if has_pr and has_page else ("pr_only" if has_pr else "page_only"),
-            "repo": repo or None,
-            "pr_number": int(pr_number) if has_pr else None,
-            "page_id": page_id or None,
-            "pr": pr_data,
-            "confluence": confluence_data,
-            "summary": "\n".join(summary_sections).strip(),
-        },
-    }
 
 # -----------------------
 # Example usage
