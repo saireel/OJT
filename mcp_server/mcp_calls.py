@@ -139,14 +139,18 @@ def update_page(page_id: str, title: str, content: str, version: int, message: s
 
     return {"success": False, "error": error or "Failed to update page"}
 
-def get_page_content(page_id: str, __user_auth: dict | None = None) -> Dict[str, Any]:
-    # Create fresh instance per request to avoid race conditions
-    api = confluence_api if not __user_auth else ConfluenceAPI(
-        email=__user_auth.get("confluence_email", ""),
-        api_token=__user_auth.get("confluence_api_token", ""),
-        base_url=__user_auth.get("confluence_base_url", ""),
-    )
-    text, error = api.get_page_storage(page_id)
+def get_page_content(page_id: str,chunk_size: int = 5000, max_sections: int = 50, _user_auth: dict | None = None) -> Dict[str, Any]:
+    # Create fresh syntax_actions instance with proper auth to avoid race conditions
+    if _user_auth:
+        api = ConfluenceAPI(
+            email=_user_auth.get("confluence_email", ""),
+            api_token=_user_auth.get("confluence_api_token", ""),
+            base_url=_user_auth.get("confluence_base_url", ""),
+        )
+        local_syntax_actions = SyntaxActions(api)
+        text, error = local_syntax_actions.get_page_content_by_sections(page_id, chunk_size, max_sections)
+    else:
+        text, error = syntax_actions.get_page_content_by_sections(page_id, chunk_size, max_sections)
     if text is not None:
         return {"success": True, "data": text}
     return {"success": False, "error": error or "Failed to get page content"}
@@ -222,13 +226,13 @@ def find_and_replace_in_page(page_id: str, find_text: str, replace_text: str, re
         }
     return result
 
-def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_sections: int = 50, __user_auth: dict | None = None) -> Dict[str, Any]:
+def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_sections: int = 50, _user_auth: dict | None = None) -> Dict[str, Any]:
     # Create fresh syntax_actions instance with proper auth to avoid race conditions
-    if __user_auth:
+    if _user_auth:
         api = ConfluenceAPI(
-            email=__user_auth.get("confluence_email", ""),
-            api_token=__user_auth.get("confluence_api_token", ""),
-            base_url=__user_auth.get("confluence_base_url", ""),
+            email=_user_auth.get("confluence_email", ""),
+            api_token=_user_auth.get("confluence_api_token", ""),
+            base_url=_user_auth.get("confluence_base_url", ""),
         )
         local_syntax_actions = SyntaxActions(api)
         text, error = local_syntax_actions.get_page_content_by_sections(page_id, chunk_size, max_sections)
@@ -238,7 +242,7 @@ def get_page_content_by_sections(page_id: str, chunk_size: int = 2500, max_secti
         return {"success": True, "data": text}
     return {"success": False, "error": error or "Failed to get page content"}
 
-def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "", skip_inline: bool = True, skip_footer: bool = False, __user_auth: dict | None = None) -> Dict[str, Any]:
+def review_confluence_page(page_input: str = "", page_id: str = "", checklist_page_id: str = "", skip_inline: bool = True, skip_footer: bool = False, _user_auth: dict | None = None) -> Dict[str, Any]:
     source = page_input or page_id
     page_ids = _extract_confluence_page_ids(source)
     if not page_ids:
@@ -248,7 +252,7 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
         }
 
     if len(page_ids) == 1:
-        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer, user_auth=__user_auth)
+        result, error = review_actions.advanced_confluence_page_review(page_ids[0], checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer, user_auth=_user_auth)
         if result is not None:
             return {"success": True, "data": result}
         return {"success": False, "error": error or "Failed to review confluence page"}
@@ -256,7 +260,7 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
     reviewed = []
     failed = []
     for pid in page_ids:
-        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer, user_auth=__user_auth)
+        result, error = review_actions.advanced_confluence_page_review(pid, checklist_page_id, skip_inline=skip_inline, skip_footer=skip_footer, user_auth=_user_auth)
         if result is not None:
             reviewed.append(result)
         else:
@@ -290,21 +294,21 @@ def review_confluence_page(page_input: str = "", page_id: str = "", checklist_pa
         },
     }
 
-def post_footer_comment(page_id: str, comment: str, __user_auth: dict | None = None) -> Dict[str, Any]:
+def post_footer_comment(page_id: str, comment: str, _user_auth: dict | None = None) -> Dict[str, Any]:
     # Create fresh instance per request to avoid race conditions
     logger.info("[POST_FOOTER] Starting footer comment post for page_id=%s", page_id)
-    logger.debug("[POST_FOOTER] Has auth: %s, comment length: %d", bool(__user_auth), len(comment) if comment else 0)
+    logger.debug("[POST_FOOTER] Has auth: %s, comment length: %d", bool(_user_auth), len(comment) if comment else 0)
     
-    if __user_auth:
+    if _user_auth:
         logger.debug("[POST_FOOTER] Auth details: email=%s, token=%s, base_url=%s",
-                    __user_auth.get("confluence_email", "NONE"),
-                    _mask_secret(__user_auth.get("confluence_api_token", "NONE")),
-                    __user_auth.get("confluence_base_url", "NONE"))
+                    _user_auth.get("confluence_email", "NONE"),
+                    _mask_secret(_user_auth.get("confluence_api_token", "NONE")),
+                    _user_auth.get("confluence_base_url", "NONE"))
     
-    api = confluence_api if not __user_auth else ConfluenceAPI(
-        email=__user_auth.get("confluence_email", ""),
-        api_token=__user_auth.get("confluence_api_token", ""),
-        base_url=__user_auth.get("confluence_base_url", ""),
+    api = confluence_api if not _user_auth else ConfluenceAPI(
+        email=_user_auth.get("confluence_email", ""),
+        api_token=_user_auth.get("confluence_api_token", ""),
+        base_url=_user_auth.get("confluence_base_url", ""),
     )
     
     logger.debug("[POST_FOOTER] Created API instance, calling post_footer_comment")
@@ -323,22 +327,22 @@ def post_footer_comment(page_id: str, comment: str, __user_auth: dict | None = N
         logger.error("[POST_FOOTER] FAILED - Error: %s", error)
         return {"success": False, "error": error or "Failed to post footer comment"}
 
-def post_inline_comment(page_id: str, comment: str, text_selection: str, match_index: int | None = None, __user_auth: dict | None = None) -> Dict[str, Any]:
+def post_inline_comment(page_id: str, comment: str, text_selection: str, match_index: int | None = None, _user_auth: dict | None = None) -> Dict[str, Any]:
     # Create fresh instance per request to avoid race conditions
     logger.info("[POST_INLINE] Starting inline comment post for page_id=%s, match_index=%s", page_id, match_index)
     logger.debug("[POST_INLINE] Has auth: %s, comment_len=%d, text_selection_len=%d", 
-                bool(__user_auth), len(comment) if comment else 0, len(text_selection) if text_selection else 0)
+                bool(_user_auth), len(comment) if comment else 0, len(text_selection) if text_selection else 0)
     
-    if __user_auth:
+    if _user_auth:
         logger.debug("[POST_INLINE] Auth details: email=%s, token=%s, base_url=%s",
-                    __user_auth.get("confluence_email", "NONE"),
-                    _mask_secret(__user_auth.get("confluence_api_token", "NONE")),
-                    __user_auth.get("confluence_base_url", "NONE"))
+                    _user_auth.get("confluence_email", "NONE"),
+                    _mask_secret(_user_auth.get("confluence_api_token", "NONE")),
+                    _user_auth.get("confluence_base_url", "NONE"))
     
-    api = confluence_api if not __user_auth else ConfluenceAPI(
-        email=__user_auth.get("confluence_email", ""),
-        api_token=__user_auth.get("confluence_api_token", ""),
-        base_url=__user_auth.get("confluence_base_url", ""),
+    api = confluence_api if not _user_auth else ConfluenceAPI(
+        email=_user_auth.get("confluence_email", ""),
+        api_token=_user_auth.get("confluence_api_token", ""),
+        base_url=_user_auth.get("confluence_base_url", ""),
     )
     
     logger.debug("[POST_INLINE] Created API instance, calling post_inline_comment")
@@ -744,7 +748,7 @@ def summarize_pr_and_confluence(
         ])
 
     if has_page:
-        page_result = get_page_content(page_id)
+        page_result = get_page_content_by_sections(page_id)
         if not page_result.get("success"):
             return page_result
 

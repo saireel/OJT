@@ -22,6 +22,8 @@ YOUR CORE RULES:
 6. If the user's intent is ambiguous, ask a clarifying question using FINAL_ANSWER.
 7. Do NOT auto-review pages unless the instructions or user explicitly ask for it.
 8. When an instructions page defines specific output requirements, derive a task contract from it and satisfy that exact contract. Do not substitute a generic template.
+9. **For PR reviews: ENSURE that arguments are complete for tools to avoid losing a step then ALWAYS fetch get_files_in_pr and get_base_and_head_sha FIRST before posting any inline comments. These are prerequisites for inline commenting.**
+10. For inline comments, try batch posting and try to optimize the use of tools so you don't necessarily do it one by one.
 
 RESPONSE FORMAT — you must ALWAYS use one of these two formats:
 
@@ -243,28 +245,39 @@ def _build_deterministic_execution_summary(user_msg: str, scratchpad: list) -> s
     failed_calls = 0
     inline_success = 0
     inline_failed = 0
+    attempted_comments = []  # Track unposted comments
     last_errors: list[str] = []
+    
     for entry in scratchpad:
         tool = entry.get("tool")
         if tool == "verifier":
             continue
         total_calls += 1
         raw = entry.get("raw_result")
+        input_args = entry.get("input", {})
+        
         if isinstance(raw, dict) and raw.get("success") is True:
             success_calls += 1
-            if tool == "post_confluence_inline_comment":
+            if tool in ["add_inline_comment", "mcp_confluence_tool_add_inline_comment"]:
                 inline_success += 1
         else:
             failed_calls += 1
-            if tool == "post_confluence_inline_comment":
+            if tool in ["add_inline_comment", "mcp_confluence_tool_add_inline_comment"]:
                 inline_failed += 1
+                # Track attempted but failed inline comments
+                attempted_comments.append({
+                    "file": input_args.get("selected_path", "unknown file"),
+                    "line_start": input_args.get("start_line", "?"),
+                    "line_end": input_args.get("end_line", "?"),
+                    "comment": input_args.get("comment_body", "")[:100],
+                    "reason": raw.get("error", "Unknown error") if isinstance(raw, dict) else str(raw)[:100]
+                })
             if isinstance(raw, dict):
-                err = raw.get("error")
-                if err:
-                    last_errors.append(str(err))
+                last_errors.append(raw.get("error", "Unknown error"))
             out = str(entry.get("output", ""))
             if "TOOL ERROR:" in out:
-                last_errors.append(out)
+                last_errors.append(out.split("TOOL ERROR:")[-1][:100])
+    
     lines = []
     lines.append("Execution summary (from actual tool results):")
     lines.append(f"- Request: {user_msg}")
@@ -272,15 +285,30 @@ def _build_deterministic_execution_summary(user_msg: str, scratchpad: list) -> s
     lines.append(f"- Successful tool calls: {success_calls}")
     lines.append(f"- Failed tool calls: {failed_calls}")
     lines.append(f"- Inline comments successfully posted: {inline_success}")
-    lines.append(f"- Inline comment failures: {inline_failed}")
-    if inline_success == 0:
-        lines.append("- Status: No inline comments were posted successfully.")
+    lines.append(f"- Inline comment attempts failed: {inline_failed}")
+    
+    if inline_success == 0 and inline_failed > 0:
+        lines.append("- Status: No inline comments were posted successfully. See below for attempted comments.")
+    elif inline_failed > 0:
+        lines.append(f"- Status: {inline_success} inline comments posted; {inline_failed} attempts failed. See below for failed attempts.")
     else:
         lines.append("- Status: Some inline comments were posted; verify page for full coverage.")
+    
+    # Include unposted comments in summary
+    if attempted_comments:
+        lines.append("")
+        lines.append("Unposted inline comments (due to tool failures):")
+        for i, comment in enumerate(attempted_comments, 1):
+            lines.append(f"  {i}. File: {comment['file']} | Lines {comment['line_start']}-{comment['line_end']}")
+            lines.append(f"     Comment: {comment['comment']}")
+            lines.append(f"     Reason: {comment['reason']}")
+    
     if last_errors:
-        lines.append("- Recent errors:")
+        lines.append("")
+        lines.append("Recent errors:")
         for err in last_errors[-3:]:
             lines.append(f"  * {err}")
+    
     lines.append("- Note: This summary is deterministic and does not rely on LLM-generated claims.")
     return "\n".join(lines)
 
@@ -518,8 +546,8 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
         return "\n".join(lines)
 
     # OPTIMIZATION: Detect PR reviews early and call tool directly (skip LLM)
-    is_pr_review = "PR:" in link_context and any(term in user_msg.lower() for term in ["review", "check", "audit", "inspect"])
-    if is_pr_review:
+   # is_pr_review = "PR:" in link_context and any(term in user_msg.lower() for term in ["review", "check", "audit", "inspect"])
+   # if is_pr_review:
         print("[AGENT] Detected PR review request - calling review_pull_request directly", flush=True)
         _emit_progress(progress_callback, "Detected PR review request.", phase="detect")
         pr_matches = re.findall(r"PR: ([^/]+)/([^#]+)#(\d+)", link_context)
@@ -557,15 +585,15 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                     lines.append(f"Reused an in-flight review result (waited {waited_s:.1f}s).")
                 if reviewed:
                     lines.append(f"Reviewed: {', '.join(reviewed)}")
-                if summary:
-                    lines.append(summary)
-                else:
-                    lines.append("Review comments (inline + summary) have been posted to the PR.")
-                return "\n".join(lines)
-            else:
-                error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
-                _emit_progress(progress_callback, f"PR review failed: {error}", phase="complete", level="error", tool="review_pull_request")
-                return f"PR review for {repo_full}#{pr_num} failed: {error}"
+       #         if summary:
+      #              lines.append(summary)
+     #           else:
+   ##                 lines.append("Review comments (inline + summary) have been posted to the PR.")
+  #              return "\n".join(lines)
+ #           else:
+#                error = result.get("error", "Unknown error") if isinstance(result, dict) else str(result)
+    #            _emit_progress(progress_callback, f"PR review failed: {error}", phase="complete", level="error", tool="review_pull_request")
+ #               return f"PR review for {repo_full}#{pr_num} failed: {error}"
     
     step_budget = _step_budget_for_request(user_msg)
     for step in range(step_budget):
@@ -748,12 +776,71 @@ def run_agent(user_msg: str, history: list, link_context: str, request_meta: dic
                 total_steps=step_budget,
                 tool=tool_name,
             )
-    # --- MAX_STEPS reached: return deterministic execution report ---
-    print(f"[AGENT] Max steps ({step_budget}) reached. Returning deterministic execution summary.", flush=True)
-    _emit_progress(progress_callback, f"Reached max steps ({step_budget}); returning execution summary.", phase="complete", level="error", total_steps=step_budget)
+        # --- MAX_STEPS reached: return deterministic execution report ---
+    print(f"[AGENT] Max steps ({step_budget}) reached. Building final summary.", flush=True)
+    _emit_progress(progress_callback, f"Reached max steps ({step_budget}); generating final summary.", phase="complete")
+    
+    # Build deterministic summary first (contains all the raw data)
+    deterministic_summary = ""
     if scratchpad:
-        return _build_deterministic_execution_summary(user_msg, scratchpad)
-    return "No tool actions were executed before reaching the step limit."
+        deterministic_summary = _build_deterministic_execution_summary(user_msg, scratchpad)
+    else:
+        deterministic_summary = "No tool actions were executed before reaching the step limit."
+    
+    # Now ask LLM to generate a user-friendly summary
+    print(f"[AGENT] Asking LLM to generate user-friendly final summary...", flush=True)
+    _emit_progress(progress_callback, "Generating user-friendly summary with AI...", phase="complete")
+    
+    llm_summary_prompt = f"""Based on this execution summary from a review task, generate a professional, user-friendly summary highlighting:
+    - What was completed successfully
+    - Specify What issues were found
+    - Explain the issues
+    - What improvements to be done based from the issues found
+    - Next steps if needed to be taken for the author
+    - Any unposted items and why they failed
+    
+
+    Keep it concise but informative. Format with markdown headers and bullet points.
+
+    Raw execution data:
+    ---
+    {deterministic_summary}
+    ---
+
+    Generate a polished summary:"""
+    
+    llm_summary, llm_err = call_llm(llm_summary_prompt)
+    user_friendly_summary = llm_summary if llm_summary and not llm_err else deterministic_summary
+    
+    # POST SUMMARY AS FOOTER COMMENT (always, even on max steps)
+    try:
+        if page_ids:
+            # Post to Confluence page
+            page_id = str(page_ids[0])
+            _emit_progress(progress_callback, f"Posting summary to Confluence page {page_id}...", phase="complete")
+            footer_result = TOOL_REGISTRY["post_footer_comment"]({
+                "page_id": page_id,
+                "comment": user_friendly_summary,
+            })
+            if isinstance(footer_result, dict) and footer_result.get("success"):
+                _emit_progress(progress_callback, "Summary posted to Confluence page.", phase="complete", level="success")
+        
+        if prs:
+            # Post to GitHub PR
+            pr = prs[0]
+            repo_full = f"{pr['owner']}/{pr['repo']}"
+            _emit_progress(progress_callback, f"Posting summary to PR {repo_full}#{pr['pr_number']}...", phase="complete")
+            pr_result = TOOL_REGISTRY["add_pr_comment"]({
+                "repo": repo_full,
+                "pr_number": int(pr["pr_number"]),
+                "comment_text": f"## Review Summary\n\n{user_friendly_summary}",
+            })
+            if isinstance(pr_result, dict) and pr_result.get("success"):
+                _emit_progress(progress_callback, "Summary posted to PR.", phase="complete", level="success")
+    except Exception as e:
+        print(f"[AGENT] Error posting summary: {e}", flush=True)
+    
+    return user_friendly_summary
 
 def _clean_review_line(line: str) -> str | None:
     """Clean a raw [REVIEW] stderr line for user-friendly SSE display.

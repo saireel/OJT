@@ -131,7 +131,7 @@ def _step_budget_for_request(user_msg: str) -> int:
     text = (user_msg or "").lower()
     fast_keywords = ["spell", "spelling", "grammar", "typo", "inline comment"]
     if any(keyword in text for keyword in fast_keywords):
-        return min(10, MAX_AGENT_STEPS)
+        return min(8, MAX_AGENT_STEPS)
     return MAX_AGENT_STEPS
 
 def _extract_confluence_page_ids_from_text(text: str) -> list[str]:
